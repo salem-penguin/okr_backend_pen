@@ -4,3 +4,4 @@ asyncpg==0.30.0
 python-dotenv==1.0.1
 pydantic==2.10.3
 DATABASE_URL=postgresql://YOUR_USER:salem@localhost:5432/okr_project
+bcrypt==4.0.1
