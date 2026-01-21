@@ -12,8 +12,15 @@ from typing import Any, List, Optional, Literal
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from passlib.context import CryptContext
 import os
+import secrets, hashlib
+from datetime import datetime, timezone, timedelta
+import hashlib
+from datetime import datetime, timezone
+from fastapi.responses import RedirectResponse
 
 from fastapi.responses import Response
+from dotenv import load_dotenv
+load_dotenv()  # add near the top of the file (right after imports)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -27,6 +34,88 @@ from itsdangerous import BadSignature, SignatureExpired
 
 SESSION_COOKIE = "session"
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:9000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+EMAIL_VERIFY_TTL_MIN = int(os.getenv("EMAIL_VERIFY_TTL_MIN", "60"))
+print("BREVO_API_KEY present?", bool(os.getenv("BREVO_API_KEY")))
+print("BREVO_SENDER_EMAIL=", os.getenv("BREVO_SENDER_EMAIL"))
+
+def make_verify_token() -> tuple[str, str]:
+    raw = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return raw, token_hash
+
+# async def send_verification_email(to_email: str, link: str):
+#     # Step-by-step: for now we just print the link in the server logs
+#     print(f"[VERIFY EMAIL] To: {to_email} Link: {link}")
+
+def send_verification_email(to_email: str, link: str):
+    import sib_api_v3_sdk
+    from sib_api_v3_sdk.rest import ApiException
+
+    api_key = os.getenv("BREVO_API_KEY")
+    sender_email = os.getenv("BREVO_SENDER_EMAIL")
+    sender_name = os.getenv("BREVO_SENDER_NAME", "Weekly Wins Hub")
+
+    if not api_key or not sender_email:
+        raise RuntimeError("BREVO_API_KEY / BREVO_SENDER_EMAIL are missing in env")
+
+    configuration = sib_api_v3_sdk.Configuration()
+    configuration.api_key["api-key"] = api_key
+
+    api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
+        sib_api_v3_sdk.ApiClient(configuration)
+    )
+
+    subject = "Verify your email"
+    html_content = f"""
+    <p>Verify your email:</p>
+    <p><a href="{link}">{link}</a></p>
+    """
+
+    send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": to_email}],
+        sender={"email": sender_email, "name": sender_name},
+        subject=subject,
+        html_content=html_content,
+    )
+
+    try:
+        resp = api_instance.send_transac_email(send_smtp_email)
+        print("[BREVO OK] response=", resp)
+    except ApiException as e:
+        print("[BREVO ERROR] status=", getattr(e, "status", None), "body=", getattr(e, "body", None))
+        raise
+
+
+# async def get_current_user(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
+#     if not session:
+#         raise HTTPException(status_code=401, detail="Not authenticated")
+
+#     try:
+#         data = read_session_token(session)
+#         user_id = data["user_id"]
+#     except SignatureExpired:
+#         raise HTTPException(status_code=401, detail="Session expired")
+#     except BadSignature:
+#         raise HTTPException(status_code=401, detail="Invalid session")
+
+#     row = await fetchrow(
+#         """
+#         SELECT
+#           u.id, u.name, u.email, u.role, u.team_id,
+#           t.name AS team_name,
+#           t.leader_id
+#         FROM users u
+#         LEFT JOIN teams t ON t.id = u.team_id
+#         WHERE u.id=$1::uuid
+#         """,
+#         user_id,
+#     )
+#     if not row:
+#         raise HTTPException(status_code=401, detail="User not found")
+
+#     return record_to_dict(row)
 async def get_current_user(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -43,6 +132,7 @@ async def get_current_user(session: str | None = Cookie(default=None, alias=SESS
         """
         SELECT
           u.id, u.name, u.email, u.role, u.team_id,
+          u.email_verified, u.status, u.role_locked,
           t.name AS team_name,
           t.leader_id
         FROM users u
@@ -54,7 +144,14 @@ async def get_current_user(session: str | None = Cookie(default=None, alias=SESS
     if not row:
         raise HTTPException(status_code=401, detail="User not found")
 
-    return record_to_dict(row)
+    me = record_to_dict(row)
+
+    # Optional hard gate (recommended): block disabled users immediately
+    if me.get("status") == "disabled":
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    return me
+
 
 
 serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="weekly-reports-session")
@@ -203,50 +300,77 @@ async def db_ping():
 #             else None
 #         ),
 #     }
-from fastapi import Cookie
+
+from fastapi import Depends
+
 @app.get("/me")
-async def me(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
-    if not session:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    try:
-        data = read_session_token(session)
-        user_id = data["user_id"]
-    except (BadSignature, SignatureExpired):
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    row = await fetchrow(
-        """
-        SELECT
-          u.id, u.name, u.email, u.role, u.team_id,
-          t.name AS team_name,
-          t.leader_id
-        FROM users u
-        LEFT JOIN teams t ON t.id = u.team_id
-        WHERE u.id = $1::uuid
-        """,
-        user_id,
-    )
-    if not row:
-        raise HTTPException(status_code=401, detail="User not found")
-
-    user = record_to_dict(row)
-
+async def me(me=Depends(get_current_user)):
     return {
-        "id": str(user["id"]),
-        "name": user["name"],
-        "email": user["email"],
-        "role": user["role"],
+        "id": str(me["id"]),
+        "name": me["name"],
+        "email": me["email"],
+        "role": me.get("role"),
+        "email_verified": me.get("email_verified"),
+        "status": me.get("status"),
+        "role_locked": me.get("role_locked"),
         "team": (
             {
-                "id": str(user["team_id"]),
-                "name": user["team_name"],
-                "leader_id": str(user["leader_id"]) if user["leader_id"] else None,
+                "id": str(me["team_id"]),
+                "name": me.get("team_name"),
+                "leader_id": str(me["leader_id"]) if me.get("leader_id") else None,
             }
-            if user["team_id"]
+            if me.get("team_id")
             else None
         ),
     }
+
+###################################correct me################################################
+# from fastapi import Cookie
+
+
+# @app.get("/me")
+# async def me(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
+#     if not session:
+#         raise HTTPException(status_code=401, detail="Not authenticated")
+
+#     try:
+#         data = read_session_token(session)
+#         user_id = data["user_id"]
+#     except (BadSignature, SignatureExpired):
+#         raise HTTPException(status_code=401, detail="Invalid session")
+
+#     row = await fetchrow(
+#         """
+#         SELECT
+#           u.id, u.name, u.email, u.role, u.team_id,
+#           t.name AS team_name,
+#           t.leader_id
+#         FROM users u
+#         LEFT JOIN teams t ON t.id = u.team_id
+#         WHERE u.id = $1::uuid
+#         """,
+#         user_id,
+#     )
+#     if not row:
+#         raise HTTPException(status_code=401, detail="User not found")
+
+#     user = record_to_dict(row)
+
+#     return {
+#         "id": str(user["id"]),
+#         "name": user["name"],
+#         "email": user["email"],
+#         "role": user["role"],
+#         "team": (
+#             {
+#                 "id": str(user["team_id"]),
+#                 "name": user["team_name"],
+#                 "leader_id": str(user["leader_id"]) if user["leader_id"] else None,
+#             }
+#             if user["team_id"]
+#             else None
+#         ),
+#     }
 
 # -------------------------
 # Weeks: current week by date
@@ -1225,21 +1349,30 @@ COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN")                  # usually None in de
 @app.post("/auth/login")
 async def auth_login(body: LoginRequest, response: Response):
     row = await fetchrow(
-        """
-        SELECT
-          u.id, u.name, u.email, u.role, u.team_id, u.password_hash,
-          t.name AS team_name,
-          t.leader_id
-        FROM users u
-        LEFT JOIN teams t ON t.id = u.team_id
-        WHERE LOWER(u.email)=LOWER($1)
-        """,
-        body.email,
-    )
+    """
+    SELECT
+      u.id, u.name, u.email, u.role, u.team_id,
+      u.email_verified, u.status,
+      u.password_hash,
+      t.name AS team_name,
+      t.leader_id
+    FROM users u
+    LEFT JOIN teams t ON t.id = u.team_id
+    WHERE LOWER(u.email)=LOWER($1)
+    """,
+    body.email,
+)
     if not row:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    
 
     user = record_to_dict(row)
+    if not user.get("email_verified"):
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in.")
+
+    if user.get("status") != "active":
+        raise HTTPException(status_code=403, detail="Account is not active.")
+
 
     if not user.get("password_hash"):
         raise HTTPException(status_code=401, detail="User has no password set")
@@ -2038,6 +2171,176 @@ async def get_team_okrs_current(me=Depends(get_current_user)):
             "objectives": objectives,
         },
     }
+
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+@app.post("/auth/signup")
+async def auth_signup(body: SignupRequest):
+    email = body.email.strip().lower()
+
+    # 1) Basic validation
+    if len(body.password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Password too long (bcrypt max 72 bytes)")
+
+    # 2) Check if user exists
+    existing = await fetchrow("SELECT id FROM users WHERE LOWER(email)=LOWER($1)", email)
+    if existing:
+        # prevent enumeration: respond success anyway
+        return {"success": True}
+
+    # 3) Create user as pending + unverified
+    password_hash = pwd_context.hash(body.password)
+
+    user_row = await fetchrow(
+        """
+        INSERT INTO users (name, email, password_hash, email_verified, status)
+        VALUES ($1, $2, $3, false, 'pending')
+        RETURNING id
+        """,
+        body.name.strip(),
+        email,
+        password_hash,
+    )
+    user_id = str(user_row["id"])
+
+    # 4) Create verification token
+    raw_token, token_hash = make_verify_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=EMAIL_VERIFY_TTL_MIN)
+
+    await execute(
+        """
+        INSERT INTO email_verifications (user_id, token_hash, expires_at)
+        VALUES ($1::uuid, $2, $3)
+        """,
+        user_id,
+        token_hash,
+        expires_at,
+    )
+
+    # 5) Send verification link (for now: prints in logs)
+    link = f"{BACKEND_URL}/auth/verify-email?token={raw_token}"
+    # await send_verification_email(email, link)
+    send_verification_email(email, link)
+
+
+    return {"success": True}
+
+@app.get("/auth/verify-email")
+async def verify_email(token: str):
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+
+    # 1) Find a valid verification record
+    row = await fetchrow(
+        """
+        SELECT id, user_id, expires_at, used_at
+        FROM email_verifications
+        WHERE token_hash = $1
+        LIMIT 1
+        """,
+        token_hash,
+    )
+
+    if not row:
+        raise HTTPException(status_code=400, detail="Invalid verification link")
+
+    if row["used_at"] is not None:
+        raise HTTPException(status_code=400, detail="Verification link already used")
+
+    if row["expires_at"] < now:
+        raise HTTPException(status_code=400, detail="Verification link expired")
+
+    # 2) Mark token as used
+    await execute(
+        """
+        UPDATE email_verifications
+        SET used_at = now()
+        WHERE id = $1::uuid
+        """,
+        str(row["id"]),
+    )
+
+    # 3) Activate user
+    await execute(
+        """
+        UPDATE users
+        SET email_verified = true,
+            status = 'active',
+            updated_at = now()
+        WHERE id = $1::uuid
+        """,
+        str(row["user_id"]),
+    )
+
+    # 4) Redirect to frontend role selection page (or login)
+    return RedirectResponse(url=f"{FRONTEND_URL}/select-role", status_code=302)
+
+class SelectRoleRequest(BaseModel):
+    role: Literal["team_member", "team_leader"]  # do NOT include "ceo"
+
+
+@app.post("/auth/select-role")
+async def select_role(body: SelectRoleRequest, me=Depends(get_current_user)):
+    # Must be verified + active
+    if not me.get("email_verified"):
+        raise HTTPException(status_code=403, detail="Email must be verified first.")
+    if me.get("status") != "active":
+        raise HTTPException(status_code=403, detail="Account is not active.")
+
+    # One-time set: if already set, block changes
+    existing = await fetchrow(
+        "SELECT role, role_locked FROM users WHERE id=$1::uuid",
+        str(me["id"]),
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if existing["role"] is not None or existing["role_locked"] is True:
+        raise HTTPException(status_code=400, detail="Role already set")
+
+    # Body.role is already constrained by Literal, but keep a hard guard
+    if body.role == "ceo":
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    await execute(
+        """
+        UPDATE users
+        SET role = $2,
+            role_locked = true,
+            updated_at = now()
+        WHERE id = $1::uuid
+        """,
+        str(me["id"]),
+        body.role,
+    )
+
+    return {"success": True, "role": body.role}
+
+
+class JoinTeamRequest(BaseModel):
+    invite_code: str
+
+@app.post("/auth/join-team")
+async def join_team(body: JoinTeamRequest, me=Depends(get_current_user)):
+    if not me.get("email_verified") or me.get("status") != "active":
+        raise HTTPException(403, "Account must be active and verified.")
+    if me.get("team_id"):
+        raise HTTPException(400, "Team already set.")
+    if me.get("role") not in ("team_member", "team_leader"):
+        raise HTTPException(400, "Role must be set first.")
+
+    team = await fetchrow("SELECT id FROM teams WHERE invite_code=$1", body.invite_code.strip())
+    if not team:
+        raise HTTPException(400, "Invalid invite code.")
+
+    await execute(
+        "UPDATE users SET team_id=$2::uuid, updated_at=now() WHERE id=$1::uuid",
+        str(me["id"]), str(team["id"])
+    )
+    return {"success": True}
 
 
 if __name__ == "__main__":
