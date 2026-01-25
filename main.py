@@ -2343,6 +2343,71 @@ async def join_team(body: JoinTeamRequest, me=Depends(get_current_user)):
     return {"success": True}
 
 
+
+@app.get("/weeks")
+async def list_weeks(
+    limit: int = Query(default=12, ge=1, le=104),
+    include_current: bool = Query(default=True),
+):
+    """
+    Returns a list of weeks (most recent first).
+    - limit: how many weeks to return (default 12)
+    - include_current: include current week in results (default True)
+    """
+
+    today = datetime.now(AMMAN_TZ).date()
+    start_anchor = today if include_current else (today - timedelta(days=7))
+
+    # Build desired week definitions in-memory
+    desired = []
+    for i in range(limit):
+        d = start_anchor - timedelta(days=7 * i)
+        start, end = week_bounds_sun_to_sat(d)
+        wid = week_id_sunday_based(d)
+        label = week_label(wid, start, end)
+        desired.append((wid, start, end, label))
+
+    # Upsert all desired weeks (idempotent)
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for wid, start, end, label in desired:
+                await conn.execute(
+                    """
+                    INSERT INTO weeks (week_id, start_date, end_date, display_label)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (week_id) DO UPDATE
+                    SET start_date = EXCLUDED.start_date,
+                        end_date = EXCLUDED.end_date,
+                        display_label = EXCLUDED.display_label
+                    """,
+                    wid, start, end, label
+                )
+
+            # Now fetch them back ordered by start_date desc
+            rows = await conn.fetch(
+                """
+                SELECT week_id, start_date, end_date, display_label
+                FROM weeks
+                WHERE week_id = ANY($1::text[])
+                ORDER BY start_date DESC
+                """,
+                [x[0] for x in desired],
+            )
+
+    items = []
+    for r in rows:
+        r = dict(r)
+        items.append({
+            "week_id": r["week_id"],
+            "start_date": r["start_date"].isoformat(),
+            "end_date": r["end_date"].isoformat(),
+            "display_label": r["display_label"],
+        })
+
+    return {"items": items, "count": len(items)}
+
+
 if __name__ == "__main__":
     import uvicorn
 
