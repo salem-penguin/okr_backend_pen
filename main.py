@@ -236,6 +236,9 @@ app = FastAPI(title="Weekly Wins Hub API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://www.weeklyreports.penlabs.online:8081",
+        "http://weeklyreports.penlabs.online:8081",
+        "https://okr-frontend-pen.pages.dev",
         "http://127.0.0.1:9000",
         "http://localhost:9000",
         "http://192.168.5.198:9000",
@@ -243,6 +246,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["set-cookie"]
 )
 
 
@@ -1397,11 +1401,13 @@ async def auth_login(body: LoginRequest, response: Response):
     key=SESSION_COOKIE,
     value=token,
     httponly=True,
-    secure=False,      # force for dev
+    #secure=True,      # force for dev
+    secure = False,
     samesite="lax",    # force for dev
+    #samesite = "none",
     max_age=60 * 60 * 24 * 7,
     path="/",
-    domain=COOKIE_DOMAIN,       # force for dev
+    #domain=COOKIE_DOMAIN,       # force for dev
 )
 
 

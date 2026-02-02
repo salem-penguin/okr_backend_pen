@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+asyncpg==0.30.0
+python-dotenv==1.0.1
+pydantic==2.10.3
+
+itsdangerous==2.2.0
+passlib[bcrypt]==1.7.4
+sib-api-v3-sdk==7.6.0
+
+# IMPORTANT: remove bcrypt pin; let passlib[bcrypt] pull a compatible bcrypt
+bcrypt==4.0.1
