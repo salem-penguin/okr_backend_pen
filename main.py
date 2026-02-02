@@ -1006,12 +1006,26 @@ from typing import Literal, Optional
 
 class AddObjectiveRequest(BaseModel):
     title: str
-    team_id: Optional[str] = None  # assign objective to a team
+    team_id: Optional[str] = None 
+    parent_id: str                     # company_level_objectives.id
+    parent_weight: int = Field(ge=1, le=100) # assign objective to a team
 
 class UpdateKeyResultRequest(BaseModel):
     id: str
     status: Literal["not_started", "in_progress", "completed"]
     progress: int = Field(ge=0, le=100)
+
+
+async def get_parent_children_total_weight(parent_id: str) -> int:
+    row = await fetchrow(
+        """
+        SELECT COALESCE(SUM(parent_weight), 0) AS total
+        FROM company_objectives
+        WHERE parent_company_level_objective_id = $1::uuid
+        """,
+        parent_id
+    )
+    return int(row["total"] or 0)
 
 
 
@@ -1071,6 +1085,17 @@ class SetObjectiveTimelineRequest(BaseModel):
     timeline_end: date
 
 
+async def get_parent_total_child_weight(parent_id: str) -> int:
+    row = await fetchrow(
+        """
+        SELECT COALESCE(SUM(parent_weight), 0) AS total
+        FROM company_objectives
+        WHERE parent_company_level_objective_id = $1::uuid
+        """,
+        parent_id,
+    )
+    return int(row["total"] or 0)
+
 async def get_objective_total_weight(objective_id: str) -> int:
     row = await fetchrow(
         """
@@ -1114,16 +1139,18 @@ async def get_current_company_okrs(me=Depends(get_current_user)):
     obj_rows = await fetch(
         """
         SELECT
-          o.id AS objective_id,
-          o.title AS objective_title,
-          o.team_id,
-          t.name AS team_name,
-          o.timeline_start,
-          o.timeline_end
-        FROM company_objectives o
-        LEFT JOIN teams t ON t.id = o.team_id
-        WHERE o.okr_id = $1::uuid
-        ORDER BY COALESCE(t.name, 'ZZZ'), o.created_at ASC
+  o.id AS objective_id,
+  o.title AS objective_title,
+  o.team_id,
+  t.name AS team_name,
+  o.timeline_start,
+  o.timeline_end,
+  o.parent_company_level_objective_id,
+  o.parent_weight
+FROM company_objectives o
+LEFT JOIN teams t ON t.id = o.team_id
+WHERE o.okr_id = $1::uuid
+ORDER BY COALESCE(t.name, 'ZZZ'), o.created_at ASC
         """,
         okr_id,
     )
@@ -1204,6 +1231,8 @@ async def get_current_company_okrs(me=Depends(get_current_user)):
             "id": str(o["objective_id"]),
             "title": o["objective_title"],
             "progress": obj_progress,
+            "parent_id": str(o["parent_company_level_objective_id"]) if o["parent_company_level_objective_id"] else None,
+            "parent_weight": int(o["parent_weight"] or 0),
             "key_results": krs,
             "timeline": {
                 "timeline_start": tl_start.isoformat(),
@@ -1326,13 +1355,22 @@ async def list_okr_teams(me=Depends(get_current_user)):
         "count": len(rows),
     }
 
+class CreateTeamObjectiveRequest(BaseModel):
+    title: str
+    team_id: Optional[str] = None
+    parent_id: str
+    parent_weight: int = Field(ge=1, le=100)
+
+class CreateCompanyObjectiveRequest(BaseModel):
+    title: str
+    team_id: Optional[str] = None  # allow "Unassigned" if you want
 
 class AddObjectiveRequest(BaseModel):
     title: str
     team_id: Optional[str] = None  # null => unassigned
 
 @app.post("/okrs/company/objectives")
-async def add_objective(body: AddObjectiveRequest, me=Depends(get_current_user)):
+async def add_objective(body: CreateTeamObjectiveRequest, me=Depends(get_current_user)):
     if me["role"] != "ceo":
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -1347,19 +1385,41 @@ async def add_objective(body: AddObjectiveRequest, me=Depends(get_current_user))
         """,
         qid, qstart, qend, me["id"]
     )
-    okr_id = okr_row["id"]
+    okr_id = str(okr_row["id"])
+
+    parent = await fetchrow(
+        """
+        SELECT id
+        FROM company_level_objectives
+        WHERE id=$1::uuid AND okr_id=$2::uuid
+        """,
+        body.parent_id,
+        okr_id,
+    )
+    if not parent:
+        raise HTTPException(status_code=404, detail="Parent company-level objective not found for this quarter")
+
+    current_total = await get_parent_total_child_weight(body.parent_id)
+    if current_total + body.parent_weight > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Parent weight exceeds 100 (current: {current_total}, adding: {body.parent_weight})"
+        )
 
     await execute(
         """
-        INSERT INTO company_objectives (okr_id, team_id, title)
-        VALUES ($1::uuid, $2::uuid, $3)
+        INSERT INTO company_objectives (okr_id, team_id, title, parent_company_level_objective_id, parent_weight)
+        VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5)
         """,
         okr_id,
-        body.team_id,   # may be None
-        body.title
+        body.team_id,
+        body.title,
+        body.parent_id,
+        body.parent_weight,
     )
 
     return {"success": True}
+
 
 
 
@@ -1867,10 +1927,283 @@ async def update_key_result_weight(body: UpdateKRWeightRequest, me=Depends(get_c
     return {"success": True}
 
 
+class CreateCompanyLevelObjectiveRequest(BaseModel):
+    title: str
+
+@app.post("/okrs/company/level-objectives")
+async def create_company_level_objective(body: CreateCompanyLevelObjectiveRequest, me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(403, "Forbidden")
+
+    qid, qstart, qend = quarter_for_date(date.today())
+
+    okr_row = await fetchrow(
+        """
+        INSERT INTO company_okrs (quarter_id, quarter_start, quarter_end, created_by)
+        VALUES ($1,$2,$3,$4)
+        ON CONFLICT (quarter_id) DO UPDATE SET quarter_start=EXCLUDED.quarter_start
+        RETURNING id
+        """,
+        qid, qstart, qend, me["id"]
+    )
+    okr_id = okr_row["id"]
+
+    await execute(
+        """
+        INSERT INTO company_level_objectives (okr_id, title)
+        VALUES ($1::uuid, $2)
+        """,
+        okr_id, body.title
+    )
+
+    return {"success": True}
+
+
+class CompanyLevelObjectiveItem(BaseModel):
+    id: str
+    title: str
+
+@app.get("/okrs/company/level-objectives")
+async def list_company_level_objectives(me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    qid, qstart, qend = quarter_for_date(date.today())
+
+    okr_row = await fetchrow(
+        "SELECT id FROM company_okrs WHERE quarter_id=$1",
+        qid,
+    )
+    if not okr_row:
+        return {"items": [], "count": 0}
+
+    okr_id = str(okr_row["id"])
+
+    rows = await fetch(
+        """
+        SELECT id, title
+        FROM company_level_objectives
+        WHERE okr_id = $1::uuid
+        ORDER BY created_at ASC
+        """,
+        okr_id,
+    )
+
+    items = [{"id": str(r["id"]), "title": r["title"]} for r in rows]
+    return {"items": items, "count": len(items)}
+
+
+
+class UpdateObjectiveParentWeightRequest(BaseModel):
+    objective_id: str
+    parent_weight: int = Field(ge=1, le=100)
+
+@app.patch("/okrs/company/objectives/parent-weight")
+async def update_objective_parent_weight(body: UpdateObjectiveParentWeightRequest, me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Only CEO can update objective weight")
+
+    # Fetch objective + its parent + current weight
+    obj = await fetchrow(
+        """
+        SELECT id, parent_company_level_objective_id, parent_weight
+        FROM company_objectives
+        WHERE id=$1::uuid
+        """,
+        body.objective_id,
+    )
+    if not obj:
+        raise HTTPException(status_code=404, detail="Objective not found")
+
+    parent_id = obj["parent_company_level_objective_id"]
+    if not parent_id:
+        raise HTTPException(status_code=400, detail="Objective has no parent company-level objective")
+
+    old_weight = int(obj["parent_weight"] or 0)
+
+    # Validate new sum <= 100 for that parent, excluding this objective
+    current_total = await get_parent_total_child_weight(str(parent_id))
+    new_total = current_total - old_weight + body.parent_weight
+    if new_total > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total children weights exceed 100 (current: {current_total}, new total: {new_total})",
+        )
+
+    await execute(
+        """
+        UPDATE company_objectives
+        SET parent_weight=$2, updated_at=now()
+        WHERE id=$1::uuid
+        """,
+        body.objective_id,
+        body.parent_weight,
+    )
+    return {"success": True}
+
+from fastapi import Query
+
+@app.get("/okrs/company/level-progress")
+async def get_company_level_progress(
+    week_id: str | None = Query(default=None),  # accepted for frontend compatibility (ignored)
+    me=Depends(get_current_user),
+):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # OKRs are quarter-based in your system
+    qid, qstart, qend = quarter_for_date(date.today())
+
+    okr_row = await fetchrow(
+        "SELECT id FROM company_okrs WHERE quarter_id = $1",
+        qid,
+    )
+    if not okr_row:
+        return {"items": [], "count": 0}
+
+    okr_id = str(okr_row["id"])
+
+    # Parents
+    parent_rows = await fetch(
+        """
+        SELECT id, title
+        FROM company_level_objectives
+        WHERE okr_id = $1::uuid
+        ORDER BY created_at ASC
+        """,
+        okr_id,
+    )
+    parents = [{"id": str(p["id"]), "title": p["title"]} for p in parent_rows]
+
+    # Children objectives (team objectives) for this quarter
+    obj_rows = await fetch(
+        """
+        SELECT
+          o.id,
+          o.title,
+          o.team_id,
+          t.name AS team_name,
+          o.parent_company_level_objective_id AS parent_id,
+          o.parent_weight
+        FROM company_objectives o
+        LEFT JOIN teams t ON t.id = o.team_id
+        WHERE o.okr_id = $1::uuid
+        ORDER BY o.created_at ASC
+        """,
+        okr_id,
+    )
+
+    if not obj_rows:
+        # parents exist but no children yet
+        return {
+            "items": [
+                {"id": p["id"], "title": p["title"], "progress": 0, "children": []}
+                for p in parents
+            ],
+            "count": len(parents),
+        }
+
+    objective_ids = [str(o["id"]) for o in obj_rows]
+
+    # Fetch ALL KRs for these objectives in one query
+    kr_rows = await fetch(
+        """
+        SELECT id, objective_id, status, progress, weight
+        FROM company_key_results
+        WHERE objective_id = ANY($1::uuid[])
+        ORDER BY created_at ASC
+        """,
+        objective_ids,
+    )
+
+    # Group KRs by objective
+    krs_by_obj: dict[str, list[dict]] = {}
+    for r in kr_rows:
+        oid = str(r["objective_id"])
+        krs_by_obj.setdefault(oid, []).append(
+            {
+                "id": str(r["id"]),
+                "status": r["status"],
+                "progress": r["progress"],
+                "weight": int(r["weight"] or 0),
+            }
+        )
+
+    def kr_effective_progress(kr: dict) -> int:
+        p = kr.get("progress")
+        if p is None:
+            if kr.get("status") == "completed":
+                return 100
+            if kr.get("status") == "in_progress":
+                return 50
+            return 0
+        return int(p)
+
+    # Compute objective progress from its KRs
+    obj_progress_map: dict[str, int] = {}
+    for o in obj_rows:
+        oid = str(o["id"])
+        krs = krs_by_obj.get(oid, [])
+        total_w = 0
+        weighted_sum = 0
+        for kr in krs:
+            w = int(kr.get("weight") or 0)
+            if w <= 0:
+                continue
+            total_w += w
+            weighted_sum += kr_effective_progress(kr) * w
+        obj_progress_map[oid] = int(round(weighted_sum / total_w)) if total_w > 0 else 0
+
+    # Group children under parent
+    children_by_parent: dict[str, list[dict]] = {}
+    for o in obj_rows:
+        parent_id = o["parent_id"]
+        if not parent_id:
+            # objective not linked to a company-level parent → skip in parent cards
+            continue
+
+        oid = str(o["id"])
+        pid = str(parent_id)
+        children_by_parent.setdefault(pid, []).append(
+            {
+                "id": oid,
+                "title": o["title"],
+                "team_name": o["team_name"],
+                "progress": obj_progress_map.get(oid, 0),
+                "parent_weight": int(o["parent_weight"] or 0),
+            }
+        )
+
+    # Compute parent progress from children (weighted by parent_weight)
+    items = []
+    for p in parents:
+        pid = p["id"]
+        children = children_by_parent.get(pid, [])
+
+        total_w = 0
+        weighted_sum = 0
+        for c in children:
+            w = int(c.get("parent_weight") or 0)
+            if w <= 0:
+                continue
+            total_w += w
+            weighted_sum += int(c.get("progress") or 0) * w
+
+        parent_progress = int(round(weighted_sum / total_w)) if total_w > 0 else 0
+
+        items.append(
+            {
+                "id": pid,
+                "title": p["title"],
+                "progress": parent_progress,
+                "children": children,
+            }
+        )
+
+    return {"items": items, "count": len(items)}
 
 if __name__ == "__main__":
     import uvicorn
 
     #uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
-
