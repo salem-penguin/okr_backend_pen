@@ -21,11 +21,17 @@ async def init_db_pool() -> asyncpg.Pool:
         )
     return _pool
 async def fetchrow(query: str, *args) -> Optional[asyncpg.Record]:
+    # print("\n=== SQL EXEC (fetchrow) ===")
+    # print(query)
+    # print("ARGS:", args)
     pool = await init_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetchrow(query, *args)
 
 async def fetch(query: str, *args) -> list[asyncpg.Record]:
+    # print("\n=== SQL EXEC (fetch) ===")
+    # print(query)
+    # print("ARGS:", args)
     pool = await init_db_pool()
     async with pool.acquire() as conn:
         return await conn.fetch(query, *args)

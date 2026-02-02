@@ -88,34 +88,7 @@ def send_verification_email(to_email: str, link: str):
         raise
 
 
-# async def get_current_user(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
-#     if not session:
-#         raise HTTPException(status_code=401, detail="Not authenticated")
 
-#     try:
-#         data = read_session_token(session)
-#         user_id = data["user_id"]
-#     except SignatureExpired:
-#         raise HTTPException(status_code=401, detail="Session expired")
-#     except BadSignature:
-#         raise HTTPException(status_code=401, detail="Invalid session")
-
-#     row = await fetchrow(
-#         """
-#         SELECT
-#           u.id, u.name, u.email, u.role, u.team_id,
-#           t.name AS team_name,
-#           t.leader_id
-#         FROM users u
-#         LEFT JOIN teams t ON t.id = u.team_id
-#         WHERE u.id=$1::uuid
-#         """,
-#         user_id,
-#     )
-#     if not row:
-#         raise HTTPException(status_code=401, detail="User not found")
-
-#     return record_to_dict(row)
 async def get_current_user(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -258,48 +231,7 @@ async def db_ping():
         val = await conn.fetchval("SELECT 1;")
     return {"db_ok": val == 1}
 
-# -------------------------
-# Mock auth: /me
-# -------------------------
-# @app.get("/me")
-# async def me(x_user_email: str | None = Header(default=None, alias="X-User-Email")):
-#     if not x_user_email:
-#         raise HTTPException(status_code=401, detail="Missing X-User-Email header")
 
-#     row = await fetchrow(
-#         """
-#         SELECT
-#           u.id, u.name, u.email, u.role, u.team_id,
-#           t.name AS team_name,
-#           t.leader_id
-#         FROM users u
-#         LEFT JOIN teams t ON t.id = u.team_id
-#         WHERE LOWER(u.email) = LOWER($1)
-#         """,
-#         x_user_email,
-#     )
-
-#     if not row:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     user = record_to_dict(row)
-
-#     # Normalize response shape
-#     return {
-#         "id": str(user["id"]),
-#         "name": user["name"],
-#         "email": user["email"],
-#         "role": user["role"],
-#         "team": (
-#             {
-#                 "id": str(user["team_id"]),
-#                 "name": user["team_name"],
-#                 "leader_id": str(user["leader_id"]) if user["leader_id"] else None,
-#             }
-#             if user["team_id"]
-#             else None
-#         ),
-#     }
 
 from fastapi import Depends
 
@@ -324,83 +256,7 @@ async def me(me=Depends(get_current_user)):
         ),
     }
 
-###################################correct me################################################
-# from fastapi import Cookie
 
-
-# @app.get("/me")
-# async def me(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
-#     if not session:
-#         raise HTTPException(status_code=401, detail="Not authenticated")
-
-#     try:
-#         data = read_session_token(session)
-#         user_id = data["user_id"]
-#     except (BadSignature, SignatureExpired):
-#         raise HTTPException(status_code=401, detail="Invalid session")
-
-#     row = await fetchrow(
-#         """
-#         SELECT
-#           u.id, u.name, u.email, u.role, u.team_id,
-#           t.name AS team_name,
-#           t.leader_id
-#         FROM users u
-#         LEFT JOIN teams t ON t.id = u.team_id
-#         WHERE u.id = $1::uuid
-#         """,
-#         user_id,
-#     )
-#     if not row:
-#         raise HTTPException(status_code=401, detail="User not found")
-
-#     user = record_to_dict(row)
-
-#     return {
-#         "id": str(user["id"]),
-#         "name": user["name"],
-#         "email": user["email"],
-#         "role": user["role"],
-#         "team": (
-#             {
-#                 "id": str(user["team_id"]),
-#                 "name": user["team_name"],
-#                 "leader_id": str(user["leader_id"]) if user["leader_id"] else None,
-#             }
-#             if user["team_id"]
-#             else None
-#         ),
-#     }
-
-# -------------------------
-# Weeks: current week by date
-# -------------------------
-# @app.get("/weeks/current")
-# async def current_week(today: date | None = Query(default=None)):
-#     # allow overriding today for tests: /weeks/current?today=2026-01-14
-#     d = today or date.today()
-
-#     row = await fetchrow(
-#         """
-#         SELECT week_id, start_date, end_date, display_label
-#         FROM weeks
-#         WHERE start_date <= $1 AND end_date >= $1
-#         ORDER BY start_date DESC
-#         LIMIT 1
-#         """,
-#         d,
-#     )
-
-#     if not row:
-#         raise HTTPException(status_code=404, detail="No week found covering this date")
-
-#     w = record_to_dict(row)
-#     return {
-#         "week_id": w["week_id"],
-#         "start_date": w["start_date"].isoformat(),
-#         "end_date": w["end_date"].isoformat(),
-#         "display_label": w["display_label"],
-#     }
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from fastapi import Query, HTTPException
@@ -528,107 +384,7 @@ async def active_form(
     }
 
 
-# @app.post("/reports/draft")
-# async def save_draft(
-#     body: SaveDraftRequest, me = Depends(get_current_user)):
-#     if not x_user_email:
-#         raise HTTPException(status_code=401, detail="Missing X-User-Email header")
 
-#     # get user + team
-#     u = await fetchrow(
-#         """
-#         SELECT u.id, u.role, u.team_id, t.leader_id
-#         FROM users u
-#         LEFT JOIN teams t ON t.id = u.team_id
-#         WHERE LOWER(u.email)=LOWER($1)
-#         """,
-#         x_user_email,
-#     )
-#     if not u:
-#         raise HTTPException(status_code=404, detail="User not found")
-#     if not u["team_id"]:
-#         raise HTTPException(status_code=400, detail="User has no team")
-
-#     # authorization: member can only save member; leader can save leader/member; ceo not saving
-#     role = u["role"]
-#     if role == "team_member" and body.report_type != "member":
-#         raise HTTPException(status_code=403, detail="Members can only save member reports")
-#     if role == "team_leader" and body.report_type not in ("member", "leader"):
-#         raise HTTPException(status_code=403, detail="Invalid report type")
-#     if role == "ceo":
-#         raise HTTPException(status_code=403, detail="CEO cannot submit reports")
-
-#     # fetch the active form schema and snapshot it
-#     if body.report_type == "member":
-#         form = await fetchrow(
-#             """
-#             SELECT id, fields, version
-#             FROM form_schemas
-#             WHERE id=$1::uuid AND scope='member'::form_scope AND is_active=true AND team_id=$2::uuid
-#             """,
-#             body.form_id,
-#             u["team_id"],
-#         )
-#     else:
-#         form = await fetchrow(
-#             """
-#             SELECT id, fields, version
-#             FROM form_schemas
-#             WHERE id=$1::uuid AND scope='leader'::form_scope AND is_active=true AND leader_id=$2::uuid
-#             """,
-#             body.form_id,
-#             u["id"],
-#         )
-
-#     if not form:
-#         raise HTTPException(status_code=400, detail="Form not found or not active for this user")
-
-#     form_snapshot = {
-#         "id": str(form["id"]),
-#         "version": form["version"],
-#         "fields": ensure_json(form["fields"]),
-#     }
-
-#     pool = await init_db_pool()
-#     async with pool.acquire() as conn:
-#         row = await conn.fetchrow(
-#             """
-#             INSERT INTO weekly_reports
-#               (week_id, user_id, team_id, report_type, status, form_id, form_snapshot, payload)
-#             VALUES
-#               ($1, $2, $3, $4::report_type, 'draft'::report_status, $5, $6::jsonb, $7::jsonb)
-#             ON CONFLICT (week_id, user_id, report_type)
-#             DO UPDATE SET
-#               form_id = EXCLUDED.form_id,
-#               form_snapshot = EXCLUDED.form_snapshot,
-#               payload = EXCLUDED.payload,
-#               updated_at = now()
-#             RETURNING id, week_id, user_id, team_id, report_type, status, created_at, updated_at, submitted_at, form_id, form_snapshot, payload
-#             """,
-#             body.week_id,
-#             u["id"],
-#             u["team_id"],
-#             body.report_type,
-#             body.form_id,
-#             json.dumps(form_snapshot),
-#             json.dumps(body.payload),
-#         )
-
-#     r = record_to_dict(row)
-#     return {
-#         "id": str(r["id"]),
-#         "week_id": r["week_id"],
-#         "user_id": str(r["user_id"]),
-#         "team_id": str(r["team_id"]),
-#         "report_type": r["report_type"],
-#         "status": r["status"],
-#         "form_id": str(r["form_id"]),
-#         "form_snapshot": ensure_json(r["form_snapshot"]),
-#         "payload": ensure_json(r["payload"]),
-#         "created_at": r["created_at"].isoformat(),
-#         "updated_at": r["updated_at"].isoformat(),
-#         "submitted_at": r["submitted_at"].isoformat() if r["submitted_at"] else None,
-#     }
 @app.post("/reports/draft")
 async def save_draft(body: SaveDraftRequest, me=Depends(get_current_user)):
     if not me["team_id"]:
@@ -716,55 +472,7 @@ async def save_draft(body: SaveDraftRequest, me=Depends(get_current_user)):
 
 
 
-# @app.post("/reports/submit")
-# async def submit_report(
-#     body: SubmitRequest,
-#     x_user_email: str | None = Header(default=None, alias="X-User-Email"),
-# ):
-#     if not x_user_email:
-#         raise HTTPException(status_code=401, detail="Missing X-User-Email header")
 
-#     u = await fetchrow(
-#         "SELECT id, role FROM users WHERE LOWER(email)=LOWER($1)",
-#         x_user_email,
-#     )
-#     if not u:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     if u["role"] == "ceo":
-#         raise HTTPException(status_code=403, detail="CEO cannot submit reports")
-
-#     pool = await init_db_pool()
-#     async with pool.acquire() as conn:
-#         row = await conn.fetchrow(
-#             """
-#             UPDATE weekly_reports
-#             SET status='submitted'::report_status,
-#                 submitted_at=now(),
-#                 updated_at=now()
-#             WHERE week_id=$1
-#               AND user_id=$2
-#               AND report_type=$3::report_type
-#               AND status='draft'::report_status
-#             RETURNING id, week_id, user_id, report_type, status, submitted_at
-#             """,
-#             body.week_id,
-#             u["id"],
-#             body.report_type,
-#         )
-
-#     if not row:
-#         raise HTTPException(status_code=404, detail="Draft report not found (or already submitted)")
-
-#     r = record_to_dict(row)
-#     return {
-#         "id": str(r["id"]),
-#         "week_id": r["week_id"],
-#         "user_id": str(r["user_id"]),
-#         "report_type": r["report_type"],
-#         "status": r["status"],
-#         "submitted_at": r["submitted_at"].isoformat() if r["submitted_at"] else None,
-#     }
 from fastapi import Depends, HTTPException
 
 @app.post("/reports/submit")
@@ -808,127 +516,7 @@ async def submit_report(body: SubmitRequest, me=Depends(get_current_user)):
 
 
 
-# @app.get("/reports")
-# async def list_reports(
-#     week_id: str = Query(...),
-#     report_type: Optional[str] = Query(default=None, pattern="^(member|leader)$"),
-#     team_id: Optional[str] = Query(default=None),
-#     x_user_email: str | None = Header(default=None, alias="X-User-Email"),
-# ):
-#     if not x_user_email:
-#         raise HTTPException(status_code=401, detail="Missing X-User-Email header")
 
-#     u = await fetchrow(
-#         """
-#         SELECT u.id, u.role, u.team_id, t.leader_id
-#         FROM users u
-#         LEFT JOIN teams t ON t.id = u.team_id
-#         WHERE LOWER(u.email)=LOWER($1)
-#         """,
-#         x_user_email,
-#     )
-#     if not u:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     role = u["role"]
-#     user_id = u["id"]
-#     user_team_id = u["team_id"]
-
-#     # Build query conditions by role
-#     # Note: we join users to return submitter info, and teams for team name.
-#     base_sql = """
-#       SELECT
-#         r.id, r.week_id, r.user_id, r.team_id, r.report_type, r.status,
-#         r.form_id, r.form_snapshot, r.payload,
-#         r.created_at, r.updated_at, r.submitted_at,
-#         u.name AS user_name, u.email AS user_email, u.role AS user_role,
-#         t.name AS team_name
-#       FROM weekly_reports r
-#       JOIN users u ON u.id = r.user_id
-#       JOIN teams t ON t.id = r.team_id
-#       WHERE r.week_id = $1
-#     """
-
-#     args = [week_id]
-#     where = []
-#     # report_type filter (optional)
-#     if report_type:
-#         where.append(f"r.report_type = ${len(args)+1}::report_type")
-#         args.append(report_type)
-
-#     # CEO can filter by team_id optionally, otherwise all
-#     if role == "ceo":
-#         if team_id:
-#             where.append(f"r.team_id = ${len(args)+1}::uuid")
-#             args.append(team_id)
-
-#     # Team leader: member reports for their team, and their own leader report
-#     elif role == "team_leader":
-#         if not user_team_id:
-#             raise HTTPException(status_code=400, detail="Leader has no team_id")
-
-#         # If caller requests team_id that isn't theirs → forbid
-#         if team_id and team_id.lower() != str(user_team_id).lower():
-#             raise HTTPException(status_code=403, detail="Leaders can only access their own team")
-
-#         # Scope:
-#         # - member reports: team_id = leader team
-#         # - leader reports: only where user_id = leader
-#         where.append(
-#             f"""(
-#                 (r.report_type='member'::report_type AND r.team_id = ${len(args)+1}::uuid)
-#                 OR
-#                 (r.report_type='leader'::report_type AND r.user_id = ${len(args)+2}::uuid)
-#             )"""
-#         )
-#         args.append(str(user_team_id))
-#         args.append(str(user_id))
-
-#     # Team member: only their own reports
-#     elif role == "team_member":
-#         where.append(f"r.user_id = ${len(args)+1}::uuid")
-#         args.append(str(user_id))
-
-#         # Optional: forbid team_id filter mismatch
-#         if team_id and user_team_id and team_id.lower() != str(user_team_id).lower():
-#             raise HTTPException(status_code=403, detail="Cannot access other teams")
-
-#     else:
-#         raise HTTPException(status_code=403, detail="Unsupported role")
-
-#     sql = base_sql
-#     if where:
-#         sql += " AND " + " AND ".join(where)
-#     sql += " ORDER BY r.submitted_at DESC NULLS LAST, r.updated_at DESC;"
-
-#     pool = await init_db_pool()
-#     async with pool.acquire() as conn:
-#         rows = await conn.fetch(sql, *args)
-
-#     results = []
-#     for row in rows:
-#         r = dict(row)
-#         results.append({
-#             "id": str(r["id"]),
-#             "week_id": r["week_id"],
-#             "team": {"id": str(r["team_id"]), "name": r["team_name"]},
-#             "submitter": {
-#                 "id": str(r["user_id"]),
-#                 "name": r["user_name"],
-#                 "email": r["user_email"],
-#                 "role": r["user_role"],
-#             },
-#             "report_type": r["report_type"],
-#             "status": r["status"],
-#             "form_id": str(r["form_id"]),
-#             "form_snapshot": ensure_json(r["form_snapshot"]),
-#             "payload": ensure_json(r["payload"]),
-#             "created_at": r["created_at"].isoformat(),
-#             "updated_at": r["updated_at"].isoformat(),
-#             "submitted_at": r["submitted_at"].isoformat() if r["submitted_at"] else None,
-#         })
-
-#     return {"items": results, "count": len(results)}
 from fastapi import Depends, HTTPException, Query
 from typing import Optional
 
@@ -1035,54 +623,6 @@ async def list_reports(
     return {"items": results, "count": len(results)}
 
 
-# @app.get("/reports/me")
-# async def my_report_for_week(
-#     week_id: str = Query(...),
-#     report_type: str = Query(..., pattern="^(member|leader)$"),
-#     x_user_email: str | None = Header(default=None, alias="X-User-Email"),
-# ):
-#     if not x_user_email:
-#         raise HTTPException(status_code=401, detail="Missing X-User-Email header")
-
-#     u = await fetchrow(
-#         "SELECT id FROM users WHERE LOWER(email)=LOWER($1)",
-#         x_user_email,
-#     )
-#     if not u:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     row = await fetchrow(
-#         """
-#         SELECT id, week_id, user_id, team_id, report_type, status,
-#                form_id, form_snapshot, payload, created_at, updated_at, submitted_at
-#         FROM weekly_reports
-#         WHERE week_id=$1 AND user_id=$2 AND report_type=$3::report_type
-#         """,
-#         week_id,
-#         u["id"],
-#         report_type,
-#     )
-
-#     if not row:
-#         return {"item": None}
-
-#     r = record_to_dict(row)
-#     return {
-#         "item": {
-#             "id": str(r["id"]),
-#             "week_id": r["week_id"],
-#             "user_id": str(r["user_id"]),
-#             "team_id": str(r["team_id"]),
-#             "report_type": r["report_type"],
-#             "status": r["status"],
-#             "form_id": str(r["form_id"]),
-#             "form_snapshot": ensure_json(r["form_snapshot"]),
-#             "payload": ensure_json(r["payload"]),
-#             "created_at": r["created_at"].isoformat(),
-#             "updated_at": r["updated_at"].isoformat(),
-#             "submitted_at": r["submitted_at"].isoformat() if r["submitted_at"] else None,
-#         }
-#     }
 from fastapi import Depends, Query
 
 @app.get("/reports/me")
@@ -1128,119 +668,7 @@ async def my_report_for_week(
 from fastapi import Header, HTTPException
 import json
 
-# @app.post("/forms/schemas")
-# async def save_form_schema(
-#     body: SaveFormSchemaRequest,
-#     x_user_email: str | None = Header(default=None, alias="X-User-Email"),
-# ):
-#     if not x_user_email:
-#         raise HTTPException(status_code=401, detail="Missing X-User-Email header")
 
-#     # Load caller
-#     caller = await fetchrow(
-#         """
-#         SELECT u.id, u.role, u.team_id, t.leader_id
-#         FROM users u
-#         LEFT JOIN teams t ON t.id = u.team_id
-#         WHERE LOWER(u.email)=LOWER($1)
-#         """,
-#         x_user_email,
-#     )
-#     if not caller:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     role = caller["role"]
-#     caller_id = str(caller["id"])
-#     caller_team_id = str(caller["team_id"]) if caller["team_id"] else None
-
-#     # Basic validation of ownership fields by scope
-#     if body.scope == "member":
-#         if not body.team_id:
-#             raise HTTPException(status_code=400, detail="team_id is required for member scope")
-#         owner_team_id = body.team_id
-#         owner_leader_id = None
-#     else:  # leader
-#         # allow omitting leader_id -> infer "myself" for leaders
-#         owner_leader_id = body.leader_id or caller_id
-#         owner_team_id = None
-
-#     # Authorization
-#     if role == "team_member":
-#         raise HTTPException(status_code=403, detail="Members cannot manage form schemas")
-
-#     if role == "team_leader":
-#         # member form: must be for leader's own team
-#         if body.scope == "member":
-#             if not caller_team_id:
-#                 raise HTTPException(status_code=400, detail="Leader has no team_id")
-#             if owner_team_id.lower() != caller_team_id.lower():
-#                 raise HTTPException(status_code=403, detail="Leaders can only manage their own team form")
-#         # leader form: must be for themselves
-#         if body.scope == "leader":
-#             if owner_leader_id.lower() != caller_id.lower():
-#                 raise HTTPException(status_code=403, detail="Leaders can only manage their own leader form")
-
-#     # role == "ceo": allowed for any (if you want to forbid, add a check here)
-
-#     pool = await init_db_pool()
-#     async with pool.acquire() as conn:
-#         async with conn.transaction():
-#             # Lock active schema row (if exists) to avoid race conditions
-#             active = await conn.fetchrow(
-#                 """
-#                 SELECT id, version
-#                 FROM form_schemas
-#                 WHERE is_active = true
-#                   AND scope = $1::form_scope
-#                   AND (
-#                     ($1='member' AND team_id = $2::uuid)
-#                     OR
-#                     ($1='leader' AND leader_id = $3::uuid)
-#                   )
-#                 ORDER BY version DESC, updated_at DESC
-#                 LIMIT 1
-#                 FOR UPDATE
-#                 """,
-#                 body.scope,
-#                 owner_team_id,
-#                 owner_leader_id,
-#             )
-
-#             next_version = (active["version"] + 1) if active else 1
-
-#             # Deactivate old active schema (if any)
-#             if active:
-#                 await conn.execute(
-#                     "UPDATE form_schemas SET is_active=false, updated_at=now() WHERE id=$1::uuid",
-#                     active["id"],
-#                 )
-
-#             # Insert new schema (active)
-#             row = await conn.fetchrow(
-#                 """
-#                 INSERT INTO form_schemas (scope, team_id, leader_id, version, is_active, fields, created_at, updated_at)
-#                 VALUES ($1::form_scope, $2::uuid, $3::uuid, $4, true, $5::jsonb, now(), now())
-#                 RETURNING id, scope, team_id, leader_id, version, is_active, fields, created_at, updated_at
-#                 """,
-#                 body.scope,
-#                 owner_team_id,
-#                 owner_leader_id,
-#                 next_version,
-#                 json.dumps(body.fields),  # or pass body.fields if your driver handles it as jsonb
-#             )
-
-#     f = record_to_dict(row)
-#     return {
-#         "id": str(f["id"]),
-#         "scope": f["scope"],
-#         "team_id": str(f["team_id"]) if f["team_id"] else None,
-#         "leader_id": str(f["leader_id"]) if f["leader_id"] else None,
-#         "version": f["version"],
-#         "is_active": f["is_active"],
-#         "fields": ensure_json(f["fields"]),
-#         "created_at": f["created_at"].isoformat(),
-#         "updated_at": f["updated_at"].isoformat(),
-#     }
 
 from fastapi import Depends, HTTPException
 from typing import Optional
@@ -1627,83 +1055,33 @@ class AddObjectiveRequest(BaseModel):
 class AddKeyResultRequest(BaseModel):
     objective_id: str
     title: str
+    weight:int = Field(default=1, ge = 1 , le = 100)
 
-# @app.get("/okrs/company/current")
-# async def get_current_company_okrs(me=Depends(get_current_user)):
-#     qid, qstart, qend = quarter_for_date(date.today())
-#     seconds_left = seconds_until_end_of_quarter(qend)
+def obj_timeline_status(timeline_end: date):
+    today = datetime.now(AMMAN_TZ).date()
+    days_remaining = (timeline_end - today).days
+    is_expired = days_remaining < 0
+    return {
+        "is_expired": is_expired,
+        "days_remaining": max(0, days_remaining),
+    }
 
-#     okr_row = await fetchrow(
-#         """
-#         SELECT id, quarter_id, quarter_start, quarter_end, created_by, created_at, updated_at
-#         FROM company_okrs
-#         WHERE quarter_id = $1
-#         """,
-#         qid,
-#     )
+class SetObjectiveTimelineRequest(BaseModel):
+    timeline_start: date
+    timeline_end: date
 
-#     if not okr_row:
-#         return {
-#             "quarter": {
-#                 "quarter_id": qid,
-#                 "start_date": qstart.isoformat(),
-#                 "end_date": qend.isoformat(),
-#                 "seconds_remaining": seconds_left,
-#             },
-#             "okr": None,
-#             "objectives": [],
-#         }
 
-#     okr = record_to_dict(okr_row)
-#     okr_id = str(okr["id"])
+async def get_objective_total_weight(objective_id: str) -> int:
+    row = await fetchrow(
+        """
+        SELECT COALESCE(SUM(weight), 0) AS total
+        FROM company_key_results
+        WHERE objective_id = $1::uuid
+        """,
+        objective_id,
+    )
+    return int(row["total"] or 0)
 
-#     # objectives
-#     obj_rows = await fetch(
-#         """
-#         SELECT id, title
-#         FROM company_objectives
-#         WHERE okr_id = $1::uuid
-#         ORDER BY created_at ASC
-#         """,
-#         okr_id,
-#     )
-
-#     objectives = []
-#     for o in obj_rows:
-#         o = dict(o)
-#         kr_rows = await fetch(
-#             """
-#             SELECT id, title
-#             FROM company_key_results
-#             WHERE objective_id = $1::uuid
-#             ORDER BY created_at ASC
-#             """,
-#             str(o["id"]),
-#         )
-
-#         objectives.append({
-#             "id": str(o["id"]),
-#             "title": o["title"],
-#             "key_results": [{"id": str(kr["id"]), "title": kr["title"]} for kr in kr_rows],
-#         })
-
-#     return {
-#         "quarter": {
-#             "quarter_id": qid,
-#             "start_date": qstart.isoformat(),
-#             "end_date": qend.isoformat(),
-#             "seconds_remaining": seconds_left,
-#         },
-#         "okr": {
-#             "id": okr_id,
-#             "quarter_id": okr["quarter_id"],
-#             "quarter_start": okr["quarter_start"].isoformat(),
-#             "quarter_end": okr["quarter_end"].isoformat(),
-#             "created_at": okr["created_at"].isoformat(),
-#             "updated_at": okr["updated_at"].isoformat(),
-#         },
-#         "objectives": objectives,
-#     }
 @app.get("/okrs/company/current")
 async def get_current_company_okrs(me=Depends(get_current_user)):
     qid, qstart, qend = quarter_for_date(date.today())
@@ -1732,26 +1110,29 @@ async def get_current_company_okrs(me=Depends(get_current_user)):
     okr = record_to_dict(okr_row)
     okr_id = str(okr["id"])
 
-    # fetch objectives + team info
+    # fetch objectives + team info + objective timeline
     obj_rows = await fetch(
         """
         SELECT
-          o.id as objective_id,
-          o.title as objective_title,
+          o.id AS objective_id,
+          o.title AS objective_title,
           o.team_id,
-          t.name as team_name
+          t.name AS team_name,
+          o.timeline_start,
+          o.timeline_end
         FROM company_objectives o
         LEFT JOIN teams t ON t.id = o.team_id
         WHERE o.okr_id = $1::uuid
-        ORDER BY COALESCE(t.name,'ZZZ'), o.created_at ASC
+        ORDER BY COALESCE(t.name, 'ZZZ'), o.created_at ASC
         """,
         okr_id,
     )
 
-    # build team map
-    teams_map = {}  # key: team_id or "unassigned"
+    teams_map = {}
+
     for o in obj_rows:
         o = dict(o)
+
         team_key = str(o["team_id"]) if o["team_id"] else "unassigned"
         team_name = o["team_name"] if o["team_name"] else "Unassigned"
 
@@ -1762,41 +1143,75 @@ async def get_current_company_okrs(me=Depends(get_current_user)):
                 "objectives": [],
             }
 
-        # key results per objective
+        # Objective timeline fallback: if null => quarter dates
+        tl_start = o["timeline_start"] or qstart
+        tl_end = o["timeline_end"] or qend
+
+        ts = obj_timeline_status(tl_end)
+        needs_extension_prompt = (me["role"] == "ceo" and ts["is_expired"])
+
+        # ✅ FIX: use alias for company_key_results (prevents any accidental "progress.xxx" misuse)
         kr_rows = await fetch(
             """
-            SELECT id, title, status, progress
-            FROM company_key_results
-            WHERE objective_id = $1::uuid
-            ORDER BY created_at ASC
+            SELECT
+              kr.id,
+              kr.title,
+              kr.status,
+              kr.progress,
+              kr.weight
+            FROM company_key_results kr
+            WHERE kr.objective_id = $1::uuid
+            ORDER BY kr.created_at ASC
             """,
             str(o["objective_id"]),
         )
-        krs = [{"id": str(kr["id"]), "title": kr["title"], "status": kr["status"], "progress": kr["progress"]} for kr in kr_rows]
 
-        # objective progress (simple rule):
-        # - if KR has progress use average, else map status: completed=100, in_progress=50, not_started=0
-        if len(krs) == 0:
-            obj_progress = 0
-        else:
-            vals = []
-            for kr in krs:
-                p = kr["progress"]
-                if p is None:
-                    if kr["status"] == "completed":
-                        p = 100
-                    elif kr["status"] == "in_progress":
-                        p = 50
-                    else:
-                        p = 0
-                vals.append(int(p))
-            obj_progress = int(sum(vals) / len(vals))
+        # safer conversion (asyncpg.Record -> dict)
+        krs = []
+        for kr in kr_rows:
+            kr = dict(kr)
+            krs.append({
+                "id": str(kr["id"]),
+                "title": kr["title"],
+                "status": kr["status"],
+                "progress": kr["progress"],
+                "weight": kr["weight"],
+            })
+
+        def kr_effective_progress(kr_item: dict):
+            p = kr_item.get("progress")
+            if p is None:
+                if kr_item.get("status") == "completed":
+                    return 100
+                if kr_item.get("status") == "in_progress":
+                    return 50
+                return 0
+            return int(p)
+
+        total_w = 0
+        weighted_sum = 0
+
+        for kr_item in krs:
+            w = int(kr_item.get("weight") or 0)
+            if w <= 0:
+                continue
+            total_w += w
+            weighted_sum += kr_effective_progress(kr_item) * w
+
+        obj_progress = int(round(weighted_sum / total_w)) if total_w > 0 else 0
 
         teams_map[team_key]["objectives"].append({
             "id": str(o["objective_id"]),
             "title": o["objective_title"],
             "progress": obj_progress,
             "key_results": krs,
+            "timeline": {
+                "timeline_start": tl_start.isoformat(),
+                "timeline_end": tl_end.isoformat(),
+                "is_expired": ts["is_expired"],
+                "days_remaining": ts["days_remaining"],
+                "needs_extension_prompt": needs_extension_prompt,
+            },
         })
 
     return {
@@ -1810,39 +1225,93 @@ async def get_current_company_okrs(me=Depends(get_current_user)):
     }
 
 
-# @app.post("/okrs/company/objectives")
-# async def add_company_objective(body: AddObjectiveRequest, me=Depends(get_current_user)):
+
+# @app.patch("/okrs/company/timeline")
+# async def set_company_okr_timeline(body: SetOKRTimelineRequest, me=Depends(get_current_user)):
 #     if me["role"] != "ceo":
 #         raise HTTPException(status_code=403, detail="Forbidden")
 
-#     qid, qstart, qend = quarter_for_date(date.today())
-
-#     # ensure okr row exists for this quarter
-#     okr_row = await fetchrow(
-#         """
-#         INSERT INTO company_okrs (quarter_id, quarter_start, quarter_end, created_by)
-#         VALUES ($1, $2, $3, $4::uuid)
-#         ON CONFLICT (quarter_id)
-#         DO UPDATE SET updated_at = now()
-#         RETURNING id
-#         """,
-#         qid,
-#         qstart,
-#         qend,
-#         str(me["id"]),
-#     )
-#     okr_id = str(record_to_dict(okr_row)["id"])
+#     # validate
+#     if body.timeline_end < body.timeline_start:
+#         raise HTTPException(status_code=400, detail="timeline_end must be >= timeline_start")
 
 #     await execute(
 #         """
-#         INSERT INTO company_objectives (okr_id, title)
-#         VALUES ($1::uuid, $2)
+#         UPDATE company_okrs
+#         SET timeline_start = $2::date,
+#             timeline_end   = $3::date,
+#             updated_at = now()
+#         WHERE quarter_id = $1
 #         """,
-#         okr_id,
-#         body.title,
+#         body.quarter_id,
+#         body.timeline_start,
+#         body.timeline_end,
 #     )
 
 #     return {"success": True}
+# @app.patch("/okrs/company/timeline/extend")
+# async def extend_company_okr_timeline(body: ExtendOKRTimelineRequest, me=Depends(get_current_user)):
+#     if me["role"] != "ceo":
+#         raise HTTPException(status_code=403, detail="Forbidden")
+
+#     # لازم تكون تمديد (مش تقليل)
+#     row = await fetchrow("SELECT timeline_end FROM company_okrs WHERE quarter_id=$1", body.quarter_id)
+#     if not row:
+#         raise HTTPException(status_code=404, detail="OKR quarter not found")
+
+#     current_end = row["timeline_end"]
+#     if current_end and body.extend_to <= current_end:
+#         raise HTTPException(status_code=400, detail="extend_to must be > current timeline_end")
+
+#     await execute(
+#         """
+#         UPDATE company_okrs
+#         SET timeline_end = $2::date,
+#             updated_at = now()
+#         WHERE quarter_id = $1
+#         """,
+#         body.quarter_id,
+#         body.extend_to,
+#     )
+
+#     return {"success": True}
+
+@app.patch("/okrs/company/objectives/{objective_id}/timeline")
+async def set_objective_timeline(
+    objective_id: str,
+    body: SetObjectiveTimelineRequest,
+    me=Depends(get_current_user),
+):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if body.timeline_end < body.timeline_start:
+        raise HTTPException(status_code=400, detail="timeline_end must be >= timeline_start")
+
+    # Ensure objective exists
+    row = await fetchrow(
+        "SELECT id FROM company_objectives WHERE id=$1::uuid",
+        objective_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Objective not found")
+
+    await execute(
+        """
+        UPDATE company_objectives
+        SET timeline_start = $2::date,
+            timeline_end   = $3::date,
+            updated_at = now()
+        WHERE id = $1::uuid
+        """,
+        objective_id,
+        body.timeline_start,
+        body.timeline_end,
+    )
+
+    return {"success": True}
+
+
 @app.get("/okrs/teams")
 async def list_okr_teams(me=Depends(get_current_user)):
     if me["role"] != "ceo":
@@ -1857,36 +1326,7 @@ async def list_okr_teams(me=Depends(get_current_user)):
         "count": len(rows),
     }
 
-# @app.post("/okrs/company/objectives")
-# async def add_company_objective(body: AddObjectiveRequest, me=Depends(get_current_user)):
-#     if me["role"] != "ceo":
-#         raise HTTPException(status_code=403, detail="Forbidden")
 
-#     qid, qstart, qend = quarter_for_date(date.today())
-
-#     okr_row = await fetchrow(
-#         """
-#         INSERT INTO company_okrs (quarter_id, quarter_start, quarter_end, created_by)
-#         VALUES ($1, $2, $3, $4::uuid)
-#         ON CONFLICT (quarter_id)
-#         DO UPDATE SET updated_at = now()
-#         RETURNING id
-#         """,
-#         qid, qstart, qend, str(me["id"]),
-#     )
-#     okr_id = str(record_to_dict(okr_row)["id"])
-
-#     await execute(
-#         """
-#         INSERT INTO company_objectives (okr_id, title, team_id)
-#         VALUES ($1::uuid, $2, $3::uuid)
-#         """,
-#         okr_id,
-#         body.title,
-#         body.team_id,
-#     )
-
-#     return {"success": True}
 class AddObjectiveRequest(BaseModel):
     title: str
     team_id: Optional[str] = None  # null => unassigned
@@ -1922,52 +1362,28 @@ async def add_objective(body: AddObjectiveRequest, me=Depends(get_current_user))
     return {"success": True}
 
 
-# @app.post("/okrs/company/key-results")
-# async def add_company_key_result(body: AddKeyResultRequest, me=Depends(get_current_user)):
-#     if me["role"] != "ceo":
-#         raise HTTPException(status_code=403, detail="Forbidden")
 
-#     await execute(
-#         """
-#         INSERT INTO company_key_results (objective_id, title)
-#         VALUES ($1::uuid, $2)
-#         """,
-#         body.objective_id,
-#         body.title,
-#     )
-
-#     return {"success": True}
-
-# @app.patch("/okrs/company/key-results")
-# async def update_company_key_result(body: UpdateKeyResultRequest, me=Depends(get_current_user)):
-#     if me["role"] != "ceo":
-#         raise HTTPException(status_code=403, detail="Forbidden")
-
-#     await execute(
-#         """
-#         UPDATE company_key_results
-#         SET status = $2::kr_status,
-#             progress = $3,
-#             updated_at = now()
-#         WHERE id = $1::uuid
-#         """,
-#         body.id,
-#         body.status,
-#         body.progress,
-#     )
-#     return {"success": True}
 @app.post("/okrs/company/key-results")
 async def create_key_result(body: AddKeyResultRequest, me=Depends(get_current_user)):
     if me["role"] != "ceo":
         raise HTTPException(403, "Only CEO can create key results")
+    
+    current_total = await get_objective_total_weight(body.objective_id)
+    if current_total + body.weight > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total KR weight exceeds 100 (current: {current_total}, adding: {body.weight})"
+        )
+
 
     await execute(
         """
-        INSERT INTO company_key_results (objective_id, title, status, progress)
-        VALUES ($1::uuid, $2, 'not_started', 0)
+        INSERT INTO company_key_results (objective_id, title, status, progress,weight)
+        VALUES ($1::uuid, $2, 'not_started', 0 , $3)
         """,
         body.objective_id,
-        body.title
+        body.title,
+        body.weight
     )
 
     return {"success": True}
@@ -1977,40 +1393,7 @@ class UpdateKRProgressRequest(BaseModel):
     status: Literal["not_started", "in_progress", "completed"]
     progress: int
 
-# @app.patch("/okrs/company/key-results/progress")
-# async def update_key_result_progress(
-#     body: UpdateKRProgressRequest,
-#     me=Depends(get_current_user)
-# ):
-#     if me["role"] not in ("team_leader", "team_member"):
-#         raise HTTPException(403, "Only teams can update progress")
 
-#     # verify KR belongs to user's team
-#     row = await fetchrow(
-#         """
-#         SELECT o.team_id
-#         FROM company_key_results kr
-#         JOIN company_objectives o ON o.id = kr.objective_id
-#         WHERE kr.id = $1::uuid
-#         """,
-#         body.id
-#     )
-
-#     if not row or str(row["team_id"]) != str(me["team_id"]):
-#         raise HTTPException(403, "Cannot update other team OKRs")
-
-#     await execute(
-#         """
-#         UPDATE company_key_results
-#         SET status=$2, progress=$3
-#         WHERE id=$1::uuid
-#         """,
-#         body.id,
-#         body.status,
-#         body.progress
-#     )
-
-#     return {"success": True}
 @app.patch("/okrs/company/key-results/progress")
 async def update_key_result_progress(body: UpdateKRProgressRequest, me=Depends(get_current_user)):
     if me["role"] != "team_leader":
@@ -2106,7 +1489,7 @@ async def get_team_okrs_current(me=Depends(get_current_user)):
     # objectives for this team only
     obj_rows = await fetch(
         """
-        SELECT o.id, o.title
+        SELECT o.id, o.title, o.timeline_start, o.timeline_end
         FROM company_objectives o
         WHERE o.okr_id = $1::uuid
           AND o.team_id = $2::uuid
@@ -2122,7 +1505,7 @@ async def get_team_okrs_current(me=Depends(get_current_user)):
 
         kr_rows = await fetch(
             """
-            SELECT id, title, status, progress
+            SELECT id, title, status, progress,weight
             FROM company_key_results
             WHERE objective_id = $1::uuid
             ORDER BY created_at ASC
@@ -2131,21 +1514,40 @@ async def get_team_okrs_current(me=Depends(get_current_user)):
         )
 
         krs = [
-            {"id": str(kr["id"]), "title": kr["title"], "status": kr["status"], "progress": kr["progress"]}
+            {"id": str(kr["id"]), "title": kr["title"], "status": kr["status"], "progress": kr["progress"] , "weight" : kr["weight"]}
             for kr in kr_rows
         ]
 
         # objective progress = avg(kr progress), fallback to status mapping
-        if not krs:
-            obj_progress = 0
-        else:
-            vals = []
-            for kr in krs:
-                p = kr["progress"]
-                if p is None:
-                    p = 100 if kr["status"] == "completed" else 50 if kr["status"] == "in_progress" else 0
-                vals.append(int(p))
-            obj_progress = int(sum(vals) / len(vals))
+        def kr_effective_progress(kr):
+            p = kr["progress"]
+            if p is None:
+                if kr["status"] == "completed":
+                    return 100
+                if kr["status"] == "in_progress":
+                    return 50
+                return 0
+            return int(p)
+
+        total_w = 0
+        weighted_sum = 0
+
+        for kr in krs:
+            w = int(kr.get("weight") or 0)
+            if w <= 0:
+                continue
+
+            total_w += w
+            weighted_sum += kr_effective_progress(kr) * w
+
+        obj_progress = int(round(weighted_sum / total_w)) if total_w > 0 else 0
+
+        tl_start = o.get("timeline_start") or qstart
+        tl_end = o.get("timeline_end") or qend
+
+        ts = obj_timeline_status(tl_end)  # you already have this helper
+
+
 
         objectives.append(
             {
@@ -2153,6 +1555,12 @@ async def get_team_okrs_current(me=Depends(get_current_user)):
                 "title": o["title"],
                 "progress": obj_progress,
                 "key_results": krs,
+                        "timeline": {
+            "timeline_start": tl_start.isoformat(),
+            "timeline_end": tl_end.isoformat(),
+            "is_expired": ts["is_expired"],
+            "days_remaining": ts["days_remaining"],
+        },
             }
         )
 
@@ -2406,6 +1814,58 @@ async def list_weeks(
         })
 
     return {"items": items, "count": len(items)}
+
+
+class AddKeyResultRequest(BaseModel):
+    objective_id: str
+    title: str
+    weight: int = Field(default=1, ge=1, le=100)
+class UpdateKRWeightRequest(BaseModel):
+    id: str
+    weight: int = Field(ge=1, le=100)
+
+@app.patch("/okrs/company/key-results/weight")
+async def update_key_result_weight(body: UpdateKRWeightRequest, me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(403, "Only CEO can update KR weight")
+    
+    
+    kr = await fetchrow(
+        """
+        SELECT objective_id, weight
+        FROM company_key_results
+        WHERE id = $1::uuid
+        """,
+        body.id,
+    )
+
+    if not kr:
+        raise HTTPException(404, "Key Result not found")
+
+    objective_id = str(kr["objective_id"])
+    old_weight = int(kr["weight"] or 0)
+
+    # current total includes this KR → remove it
+    current_total = await get_objective_total_weight(objective_id)
+    new_total = current_total - old_weight + body.weight
+
+    if new_total > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total KR weight exceeds 100 (current: {current_total}, new total: {new_total})"
+        )
+
+    await execute(
+        """
+        UPDATE company_key_results
+        SET weight=$2, updated_at=now()
+        WHERE id=$1::uuid
+        """,
+        body.id,
+        body.weight,
+    )
+    return {"success": True}
+
 
 
 if __name__ == "__main__":
