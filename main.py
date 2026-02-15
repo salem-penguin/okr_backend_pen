@@ -1884,6 +1884,60 @@ class UpdateKRWeightRequest(BaseModel):
     id: str
     weight: int = Field(ge=1, le=100)
 
+
+from uuid import UUID
+
+@app.post("/okrs/team/key-results")
+async def team_leader_create_key_result(body: AddKeyResultRequest, me=Depends(get_current_user)):
+    if me["role"] != "team_leader":
+        raise HTTPException(status_code=403, detail="Only team leader can create key results")
+
+    if not me.get("team_id"):
+        raise HTTPException(status_code=400, detail="Leader has no team")
+
+    # 0) Validate UUID (so you don't get silent weird 404s)
+    try:
+        objective_id = str(UUID(body.objective_id))
+    except Exception:
+        raise HTTPException(status_code=400, detail="objective_id must be a valid UUID")
+
+    # 1) Validate objective exists AND belongs to leader's team (same pattern as progress endpoint)
+    obj = await fetchrow(
+        """
+        SELECT o.id
+        FROM company_objectives o
+        WHERE o.id = $1::uuid
+          AND o.team_id = $2::uuid
+        """,
+        objective_id,
+        str(me["team_id"]),
+    )
+    if not obj:
+        # if you prefer 403 instead, change this line
+        raise HTTPException(status_code=404, detail="Objective not found for your team")
+
+    # 2) Enforce KR total weight <= 100 (same as CEO logic)
+    current_total = await get_objective_total_weight(objective_id)
+    if current_total + body.weight > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total KR weight exceeds 100 (current: {current_total}, adding: {body.weight})"
+        )
+
+    # 3) Insert KR
+    await execute(
+        """
+        INSERT INTO company_key_results (objective_id, title, status, progress, weight)
+        VALUES ($1::uuid, $2, 'not_started', 0, $3)
+        """,
+        objective_id,
+        body.title,
+        body.weight,
+    )
+
+    return {"success": True}
+
+
 @app.patch("/okrs/company/key-results/weight")
 async def update_key_result_weight(body: UpdateKRWeightRequest, me=Depends(get_current_user)):
     if me["role"] != "ceo":
