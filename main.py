@@ -129,6 +129,40 @@ async def get_current_user(session: str | None = Cookie(default=None, alias=SESS
 
 serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="weekly-reports-session")
 
+from uuid import UUID
+
+def extract_kr_updates(payload: dict) -> list[dict]:
+    items = payload.get("kr_updates") or []
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        return []
+
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+
+        kr_id = (it.get("kr_id") or "").strip()
+        note = (it.get("note") or "").strip()
+        if not kr_id or not note:
+            continue
+
+        # validate UUID early (avoid silent drops)
+        try:
+            kr_uuid = str(UUID(kr_id))
+        except Exception:
+            continue
+
+        meta = dict(it)
+        meta.pop("kr_id", None)
+        meta.pop("note", None)
+
+        out.append({"kr_id": kr_uuid, "note": note, "meta": meta})
+    return out
+
+
+
 def create_session_token(user_id: str) -> str:
     return serializer.dumps({"user_id": user_id})
 
@@ -474,10 +508,8 @@ async def save_draft(body: SaveDraftRequest, me=Depends(get_current_user)):
 
 
 from fastapi import Depends, HTTPException
-
 @app.post("/reports/submit")
 async def submit_report(body: SubmitRequest, me=Depends(get_current_user)):
-    # role gate
     if me["role"] == "ceo":
         raise HTTPException(status_code=403, detail="CEO cannot submit reports")
 
@@ -493,24 +525,75 @@ async def submit_report(body: SubmitRequest, me=Depends(get_current_user)):
               AND user_id=$2
               AND report_type=$3::report_type
               AND status='draft'::report_status
-            RETURNING id, week_id, user_id, report_type, status, submitted_at
+            RETURNING id, week_id, user_id, team_id, report_type, status, submitted_at, payload
             """,
             body.week_id,
             me["id"],
             body.report_type,
         )
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Draft report not found (or already submitted)")
+        if not row:
+            raise HTTPException(status_code=404, detail="Draft report not found (or already submitted)")
 
-    r = record_to_dict(row)
+        report_id = str(row["id"])
+        team_id = row["team_id"]
+        payload = row["payload"] if not isinstance(row["payload"], str) else json.loads(row["payload"])
+
+        # No team => cannot attach KR updates
+        if not team_id:
+            # you can choose to allow leader report without team, but for OKRs you need team
+            raise HTTPException(status_code=400, detail="User has no team; cannot save KR updates")
+
+        updates = extract_kr_updates(payload)
+
+        # keep submit working even if no updates
+        await conn.execute(
+            "DELETE FROM company_key_result_updates WHERE report_id=$1::uuid",
+            report_id,
+        )
+
+        if updates:
+            inserted = await conn.fetch(
+                """
+                WITH items AS (
+                  SELECT *
+                  FROM jsonb_to_recordset($1::jsonb)
+                  AS x(kr_id uuid, note text, meta jsonb)
+                ),
+                allowed AS (
+                  SELECT x.*
+                  FROM items x
+                  JOIN company_key_results kr ON kr.id = x.kr_id
+                  JOIN company_objectives o ON o.id = kr.objective_id
+                  WHERE o.team_id = $2::uuid
+                )
+                INSERT INTO company_key_result_updates
+                  (kr_id, week_id, report_id, author_user_id, team_id, note, meta)
+                SELECT
+                  a.kr_id, $3, $4::uuid, $5::uuid, $2::uuid, a.note, COALESCE(a.meta,'{}'::jsonb)
+                FROM allowed a
+                RETURNING id
+                """,
+                json.dumps(updates),
+                str(team_id),
+                body.week_id,
+                report_id,
+                str(me["id"]),
+            )
+
+            if len(inserted) != len(updates):
+                raise HTTPException(
+                    status_code=400,
+                    detail="One or more selected key results are invalid for your team",
+                )
+
     return {
-        "id": str(r["id"]),
-        "week_id": r["week_id"],
-        "user_id": str(r["user_id"]),
-        "report_type": r["report_type"],
-        "status": r["status"],
-        "submitted_at": r["submitted_at"].isoformat() if r["submitted_at"] else None,
+        "id": report_id,
+        "week_id": row["week_id"],
+        "user_id": str(row["user_id"]),
+        "report_type": row["report_type"],
+        "status": row["status"],
+        "submitted_at": row["submitted_at"].isoformat() if row["submitted_at"] else None,
     }
 
 
@@ -1884,6 +1967,60 @@ class UpdateKRWeightRequest(BaseModel):
     id: str
     weight: int = Field(ge=1, le=100)
 
+
+from uuid import UUID
+
+@app.post("/okrs/team/key-results")
+async def team_leader_create_key_result(body: AddKeyResultRequest, me=Depends(get_current_user)):
+    if me["role"] != "team_leader":
+        raise HTTPException(status_code=403, detail="Only team leader can create key results")
+
+    if not me.get("team_id"):
+        raise HTTPException(status_code=400, detail="Leader has no team")
+
+    # 0) Validate UUID (so you don't get silent weird 404s)
+    try:
+        objective_id = str(UUID(body.objective_id))
+    except Exception:
+        raise HTTPException(status_code=400, detail="objective_id must be a valid UUID")
+
+    # 1) Validate objective exists AND belongs to leader's team (same pattern as progress endpoint)
+    obj = await fetchrow(
+        """
+        SELECT o.id
+        FROM company_objectives o
+        WHERE o.id = $1::uuid
+          AND o.team_id = $2::uuid
+        """,
+        objective_id,
+        str(me["team_id"]),
+    )
+    if not obj:
+        # if you prefer 403 instead, change this line
+        raise HTTPException(status_code=404, detail="Objective not found for your team")
+
+    # 2) Enforce KR total weight <= 100 (same as CEO logic)
+    current_total = await get_objective_total_weight(objective_id)
+    if current_total + body.weight > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total KR weight exceeds 100 (current: {current_total}, adding: {body.weight})"
+        )
+
+    # 3) Insert KR
+    await execute(
+        """
+        INSERT INTO company_key_results (objective_id, title, status, progress, weight)
+        VALUES ($1::uuid, $2, 'not_started', 0, $3)
+        """,
+        objective_id,
+        body.title,
+        body.weight,
+    )
+
+    return {"success": True}
+
+
 @app.patch("/okrs/company/key-results/weight")
 async def update_key_result_weight(body: UpdateKRWeightRequest, me=Depends(get_current_user)):
     if me["role"] != "ceo":
@@ -2199,6 +2336,132 @@ async def get_company_level_progress(
                 "children": children,
             }
         )
+
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/okrs/key-results/{kr_id}/updates")
+async def get_kr_updates(
+    kr_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    me=Depends(get_current_user),
+):
+    role = me["role"]
+    team_id = me.get("team_id")
+
+    where = ["u.kr_id = $1::uuid"]
+    args = [kr_id, limit]
+
+    if role == "ceo":
+        pass
+    elif role == "team_leader":
+        if not team_id:
+            raise HTTPException(400, "Leader has no team")
+        where.append("u.team_id = $3::uuid")
+        args.append(str(team_id))
+    elif role == "team_member":
+        where.append("u.author_user_id = $3::uuid")
+        args.append(str(me["id"]))
+    else:
+        raise HTTPException(403, "Forbidden")
+
+    sql = f"""
+      SELECT
+        u.id, u.week_id, w.display_label,
+        u.note, u.meta, u.created_at,
+        au.id AS author_id, au.name AS author_name, au.email AS author_email
+      FROM company_key_result_updates u
+      LEFT JOIN weeks w ON w.week_id = u.week_id
+      LEFT JOIN users au ON au.id = u.author_user_id
+      WHERE {" AND ".join(where)}
+      ORDER BY u.created_at DESC
+      LIMIT $2
+    """
+
+    rows = await fetch(sql, *args)
+
+    items = []
+    for r in rows:
+        r = dict(r)
+        items.append({
+            "id": str(r["id"]),
+            "week_id": r["week_id"],
+            "week_label": r.get("display_label"),
+            "note": r["note"],
+            "meta": ensure_json(r["meta"]),
+            "created_at": r["created_at"].isoformat(),
+            "author": None if not r.get("author_id") else {
+                "id": str(r["author_id"]),
+                "name": r.get("author_name"),
+                "email": r.get("author_email"),
+            }
+        })
+
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/okrs/company/key-results/updates")
+async def get_company_kr_updates(
+    limit: int = Query(default=200, ge=1, le=500),
+    me=Depends(get_current_user),
+):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    qid, qstart, qend = quarter_for_date(date.today())
+
+    sql = """
+      SELECT
+        u.id,
+        u.kr_id,
+        kr.title AS kr_title,
+        kr.objective_id,
+        o.title AS objective_title,
+        o.team_id,
+        t.name AS team_name,
+        u.week_id,
+        w.display_label AS week_label,
+        u.note,
+        u.meta,
+        u.created_at,
+        au.id AS author_id,
+        au.name AS author_name,
+        au.email AS author_email
+      FROM company_key_result_updates u
+      JOIN company_key_results kr ON kr.id = u.kr_id
+      JOIN company_objectives o ON o.id = kr.objective_id
+      JOIN company_okrs ok ON ok.id = o.okr_id
+      LEFT JOIN teams t ON t.id = o.team_id
+      LEFT JOIN weeks w ON w.week_id = u.week_id
+      LEFT JOIN users au ON au.id = u.author_user_id
+      WHERE ok.quarter_id = $1
+      ORDER BY u.created_at DESC
+      LIMIT $2
+    """
+
+    rows = await fetch(sql, qid, limit)
+
+    items = []
+    for r in rows:
+        r = dict(r)
+        items.append({
+            "id": str(r["id"]),
+            "kr_id": str(r["kr_id"]),
+            "kr_title": r["kr_title"],
+            "objective_id": str(r["objective_id"]),
+            "objective_title": r["objective_title"],
+            "team": None if not r.get("team_id") else {"id": str(r["team_id"]), "name": r.get("team_name")},
+            "week_id": r["week_id"],
+            "week_label": r.get("week_label"),
+            "note": r["note"],
+            "meta": ensure_json(r["meta"]),
+            "created_at": r["created_at"].isoformat(),
+            "author": None if not r.get("author_id") else {
+                "id": str(r["author_id"]),
+                "name": r.get("author_name"),
+                "email": r.get("author_email"),
+            }
+        })
 
     return {"items": items, "count": len(items)}
 
