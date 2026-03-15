@@ -13,6 +13,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from passlib.context import CryptContext
 import os
 import secrets, hashlib
+import html
 from datetime import datetime, timezone, timedelta
 import hashlib
 from datetime import datetime, timezone
@@ -45,20 +46,26 @@ def make_verify_token() -> tuple[str, str]:
     token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return raw, token_hash
 
-# async def send_verification_email(to_email: str, link: str):
-#     # Step-by-step: for now we just print the link in the server logs
-#     print(f"[VERIFY EMAIL] To: {to_email} Link: {link}")
-
-def send_verification_email(to_email: str, link: str):
+def send_brevo_email(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    sender_email: str | None = None,
+    sender_name: str | None = None,
+):
+    """
+    Thin wrapper around Brevo transactional emails.
+    Defaults sender to the admin account unless explicitly overridden.
+    """
     import sib_api_v3_sdk
     from sib_api_v3_sdk.rest import ApiException
 
     api_key = os.getenv("BREVO_API_KEY")
-    sender_email = os.getenv("BREVO_SENDER_EMAIL")
-    sender_name = os.getenv("BREVO_SENDER_NAME", "Weekly Wins Hub")
+    sender_email = sender_email or os.getenv("BREVO_SENDER_EMAIL") or "s.alnsour@penguinin.com"
+    sender_name = sender_name or os.getenv("BREVO_SENDER_NAME", "Penguinin Admin")
 
-    if not api_key or not sender_email:
-        raise RuntimeError("BREVO_API_KEY / BREVO_SENDER_EMAIL are missing in env")
+    if not api_key:
+        raise RuntimeError("BREVO_API_KEY is missing in env")
 
     configuration = sib_api_v3_sdk.Configuration()
     configuration.api_key["api-key"] = api_key
@@ -66,12 +73,6 @@ def send_verification_email(to_email: str, link: str):
     api_instance = sib_api_v3_sdk.TransactionalEmailsApi(
         sib_api_v3_sdk.ApiClient(configuration)
     )
-
-    subject = "Verify your email"
-    html_content = f"""
-    <p>Verify your email:</p>
-    <p><a href="{link}">{link}</a></p>
-    """
 
     send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
         to=[{"email": to_email}],
@@ -86,6 +87,15 @@ def send_verification_email(to_email: str, link: str):
     except ApiException as e:
         print("[BREVO ERROR] status=", getattr(e, "status", None), "body=", getattr(e, "body", None))
         raise
+
+
+def send_verification_email(to_email: str, link: str):
+    subject = "Verify your email"
+    html_content = f"""
+    <p>Verify your email:</p>
+    <p><a href="{link}">{link}</a></p>
+    """
+    send_brevo_email(to_email=to_email, subject=subject, html_content=html_content)
 
 
 
@@ -210,6 +220,11 @@ class SaveDraftRequest(BaseModel):
 class SubmitRequest(BaseModel):
     week_id: str
     report_type: str = Field(pattern="^(member|leader)$")
+
+class SendLeaderReminderRequest(BaseModel):
+    leader_id: str
+    subject: str = Field(default="Reminder: Weekly report pending", max_length=120)
+    message: str = Field(..., max_length=2000)
 
 def ensure_json(value):
     return json.loads(value) if isinstance(value, str) else value
@@ -368,6 +383,45 @@ async def current_week(today: date | None = Query(default=None)):
         "end_date": w["end_date"].isoformat(),
         "display_label": w["display_label"],
     }
+
+@app.post("/ceo/reminders/team-leader")
+async def send_team_leader_reminder(body: SendLeaderReminderRequest, me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Only CEO can send reminders")
+
+    leader = await fetchrow(
+        """
+        SELECT id, name, email, status
+        FROM users
+        WHERE id = $1::uuid AND role = 'team_leader'
+        """,
+        body.leader_id,
+    )
+    if not leader:
+        raise HTTPException(status_code=404, detail="Team leader not found")
+    if leader["status"] != "active":
+        raise HTTPException(status_code=400, detail="Leader is not active")
+
+    leader_name = leader["name"] or "there"
+    safe_message = html.escape(body.message).replace("\n", "<br>")
+    html_body = f"""
+    <p>Hi {leader_name},</p>
+    <p>{safe_message}</p>
+    <p>- {me.get("name") or "CEO"}</p>
+    """
+
+    try:
+        send_brevo_email(
+            to_email=leader["email"],
+            subject=body.subject,
+            html_content=html_body,
+            sender_email=os.getenv("BREVO_ADMIN_EMAIL") or "s.alnsour@penguinin.com",
+            sender_name=os.getenv("BREVO_SENDER_NAME", "Penguinin Admin"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send reminder email: {e}")
+
+    return {"success": True, "leader_id": str(leader["id"])}
 
 # -------------------------
 # Forms: active schema
@@ -641,32 +695,32 @@ async def list_reports(
             args.append(team_id)
 
     elif role == "team_leader":
-        if not user_team_id:
-            raise HTTPException(status_code=400, detail="Leader has no team_id")
+        leader_filters = []
 
-        # If caller requests team_id that isn't theirs → forbid
-        if team_id and team_id.lower() != str(user_team_id).lower():
-            raise HTTPException(status_code=403, detail="Leaders can only access their own team")
+        if report_type in (None, "leader"):
+            leader_filters.append(
+                f"(r.report_type='leader'::report_type AND r.user_id = ${len(args)+1}::uuid)"
+            )
+            args.append(str(user_id))
 
-        # - member reports: team_id = leader team
-        # - leader reports: only where user_id = leader
-        where.append(
-            f"""(
-                (r.report_type='member'::report_type AND r.team_id = ${len(args)+1}::uuid)
-                OR
-                (r.report_type='leader'::report_type AND r.user_id = ${len(args)+2}::uuid)
-            )"""
-        )
-        args.append(str(user_team_id))
-        args.append(str(user_id))
+        if report_type in (None, "member"):
+            if user_team_id:
+                if team_id and team_id.lower() != str(user_team_id).lower():
+                    raise HTTPException(status_code=403, detail="Leaders can only access their own team")
+
+                leader_filters.append(
+                    f"(r.report_type='member'::report_type AND r.team_id = ${len(args)+1}::uuid)"
+                )
+                args.append(str(user_team_id))
+
+        if not leader_filters:
+            return {"items": [], "count": 0}
+
+        where.append("(" + " OR ".join(leader_filters) + ")")
 
     elif role == "team_member":
         where.append(f"r.user_id = ${len(args)+1}::uuid")
         args.append(str(user_id))
-
-        # Optional: forbid team_id filter mismatch
-        if team_id and user_team_id and team_id.lower() != str(user_team_id).lower():
-            raise HTTPException(status_code=403, detail="Cannot access other teams")
 
     else:
         raise HTTPException(status_code=403, detail="Unsupported role")
