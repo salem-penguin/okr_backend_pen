@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, BackgroundTasks
 from contextlib import asynccontextmanager
 from datetime import date
 from db import init_db_pool, close_db_pool, fetchrow, record_to_dict,fetch ,fetchval,execute
@@ -12,7 +12,7 @@ from typing import Any, List, Optional, Literal
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from passlib.context import CryptContext
 import os
-import secrets, hashlib
+import secrets, hashlib, string
 import html
 from datetime import datetime, timezone, timedelta
 import hashlib
@@ -97,6 +97,36 @@ def send_verification_email(to_email: str, link: str):
     """
     send_brevo_email(to_email=to_email, subject=subject, html_content=html_content)
 
+
+
+INVITE_CODE_ALPHABET = string.ascii_uppercase + string.digits
+
+async def generate_unique_invite_code(conn, length: int = 8, max_attempts: int = 5) -> str:
+    for _ in range(max_attempts):
+        code = "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(length))
+        exists = await conn.fetchval("SELECT 1 FROM teams WHERE invite_code=$1", code)
+        if not exists:
+            return code
+    raise HTTPException(status_code=500, detail="Failed to generate a unique invite code; please retry.")
+
+def serialize_team_creation_request(row):
+    if not row:
+        return None
+    data = record_to_dict(row)
+    return {
+        "id": str(data["id"]),
+        "team_name": data["team_name"],
+        "status": data["status"],
+        "requested_at": data["requested_at"].isoformat() if data.get("requested_at") else None,
+        "reviewed_at": data["reviewed_at"].isoformat() if data.get("reviewed_at") else None,
+        "reviewed_by": str(data["reviewed_by"]) if data.get("reviewed_by") else None,
+        "approved_team_id": str(data["approved_team_id"]) if data.get("approved_team_id") else None,
+        "requester_user_id": str(data["requester_user_id"]),
+        "admin_note": data.get("admin_note"),
+    }
+
+def get_admin_request_email() -> str | None:
+    return os.getenv("TEAM_REQUEST_ADMIN_EMAIL") or os.getenv("BREVO_ADMIN_EMAIL")
 
 
 async def get_current_user(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)):
@@ -1886,6 +1916,12 @@ async def verify_email(token: str):
 class SelectRoleRequest(BaseModel):
     role: Literal["team_member", "team_leader"]  # do NOT include "ceo"
 
+class CreateTeamRequestRequest(BaseModel):
+    team_name: str
+
+class RejectTeamRequestBody(BaseModel):
+    admin_note: Optional[str] = None
+
 
 @app.post("/auth/select-role")
 async def select_role(body: SelectRoleRequest, me=Depends(get_current_user)):
@@ -1925,6 +1961,279 @@ async def select_role(body: SelectRoleRequest, me=Depends(get_current_user)):
     return {"success": True, "role": body.role}
 
 
+@app.post("/teams/request-create")
+async def request_team_creation(body: CreateTeamRequestRequest, background_tasks: BackgroundTasks, me=Depends(get_current_user)):
+    if not me.get("email_verified") or me.get("status") != "active":
+        raise HTTPException(status_code=403, detail="Account must be active and verified.")
+    if me.get("role") != "team_leader":
+        raise HTTPException(status_code=403, detail="Only team leaders can request a team.")
+    if me.get("team_id"):
+        raise HTTPException(status_code=400, detail="You already belong to a team.")
+
+    team_name = (body.team_name or "").strip()
+    if not team_name:
+        raise HTTPException(status_code=400, detail="team_name is required")
+
+    existing_team = await fetchval("SELECT 1 FROM teams WHERE LOWER(name)=LOWER($1)", team_name)
+    if existing_team:
+        raise HTTPException(status_code=400, detail="A team with this name already exists.")
+
+    pending = await fetchrow(
+        "SELECT id FROM team_creation_requests WHERE requester_user_id=$1::uuid AND status='pending'",
+        str(me["id"]),
+    )
+    if pending:
+        raise HTTPException(status_code=400, detail="You already have a pending team creation request.")
+
+    row = await fetchrow(
+        """
+        INSERT INTO team_creation_requests (requester_user_id, team_name)
+        VALUES ($1::uuid, $2)
+        RETURNING id, requester_user_id, team_name, status, requested_at, reviewed_at, reviewed_by, approved_team_id, admin_note
+        """,
+        str(me["id"]),
+        team_name,
+    )
+
+    request_id = str(row["id"])
+    admin_email = get_admin_request_email()
+    if admin_email:
+        approval_link = f"{BACKEND_URL}/teams/requests/{request_id}/approve"
+        rejection_link = f"{BACKEND_URL}/teams/requests/{request_id}/reject"
+        requester_name = me.get("name") or "N/A"
+        html_content = f"""
+        <p>A team leader requested to create a new team.</p>
+        <ul>
+          <li>Requester: {html.escape(requester_name)} ({me.get("email")})</li>
+          <li>User ID: {me["id"]}</li>
+          <li>Team name: {html.escape(team_name)}</li>
+          <li>Request ID: {request_id}</li>
+        </ul>
+        <p><strong>Approve:</strong> <a href="{approval_link}">{approval_link}</a></p>
+        <p><strong>Reject:</strong> <a href="{rejection_link}">{rejection_link}</a></p>
+        """
+        background_tasks.add_task(
+            send_brevo_email,
+            to_email=admin_email,
+            subject=f"[Action Needed] Team creation request: {team_name}",
+            html_content=html_content,
+            sender_email=os.getenv("BREVO_ADMIN_EMAIL") or os.getenv("BREVO_SENDER_EMAIL"),
+            sender_name=os.getenv("BREVO_SENDER_NAME", "Penguinin Admin"),
+        )
+    else:
+        print("[TEAM REQUEST] Admin email not configured; skipping email send.")
+
+    return {"success": True, "request": serialize_team_creation_request(row)}
+
+
+@app.get("/teams/requests")
+async def list_team_creation_requests(status: Optional[str] = Query(default="pending"), me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Only CEO can view team requests")
+
+    allowed_statuses = {"pending", "approved", "rejected"}
+    filters = []
+    args = []
+    if status:
+        st = status.lower()
+        if st not in allowed_statuses:
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        filters.append(f"r.status = ${len(args)+1}")
+        args.append(st)
+
+    sql = """
+      SELECT
+        r.id, r.requester_user_id, r.team_name, r.status, r.requested_at,
+        r.reviewed_at, r.reviewed_by, r.approved_team_id, r.admin_note,
+        u.name AS requester_name, u.email AS requester_email
+      FROM team_creation_requests r
+      JOIN users u ON u.id = r.requester_user_id
+    """
+    if filters:
+        sql += " WHERE " + " AND ".join(filters)
+    sql += " ORDER BY r.requested_at DESC"
+
+    rows = await fetch(sql, *args)
+    items = []
+    for r in rows:
+        rd = dict(r)
+        item = serialize_team_creation_request(r)
+        item["requester"] = {
+            "id": str(rd["requester_user_id"]),
+            "name": rd.get("requester_name"),
+            "email": rd.get("requester_email"),
+        }
+        items.append(item)
+
+    return items
+
+
+@app.get("/teams/requests/me")
+async def my_team_requests(me=Depends(get_current_user)):
+    rows = await fetch(
+        """
+        SELECT id, requester_user_id, team_name, status, requested_at, reviewed_at, reviewed_by, approved_team_id, admin_note
+        FROM team_creation_requests
+        WHERE requester_user_id=$1::uuid
+        ORDER BY requested_at DESC
+        """,
+        str(me["id"]),
+    )
+    items = [serialize_team_creation_request(r) for r in rows]
+    return items
+
+
+@app.post("/teams/requests/{request_id}/approve")
+async def approve_team_request(request_id: str, me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Only CEO can approve requests")
+
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            req = await conn.fetchrow(
+                """
+                SELECT id, requester_user_id, team_name, status, requested_at, reviewed_at, reviewed_by, approved_team_id, admin_note
+                FROM team_creation_requests
+                WHERE id=$1::uuid
+                FOR UPDATE
+                """,
+                request_id,
+            )
+            if not req:
+                raise HTTPException(status_code=404, detail="Request not found")
+            if req["status"] != "pending":
+                raise HTTPException(status_code=400, detail="Request already reviewed")
+
+            existing_team = await conn.fetchval("SELECT 1 FROM teams WHERE LOWER(name)=LOWER($1)", req["team_name"])
+            if existing_team:
+                raise HTTPException(status_code=400, detail="A team with this name already exists.")
+
+            requester = await conn.fetchrow(
+                """
+                SELECT id, email_verified, status, role, team_id
+                FROM users
+                WHERE id=$1::uuid
+                FOR UPDATE
+                """,
+                str(req["requester_user_id"]),
+            )
+            if not requester:
+                raise HTTPException(status_code=404, detail="Requester user not found")
+            if requester["team_id"]:
+                raise HTTPException(status_code=400, detail="Requester already in a team")
+            if requester["status"] != "active":
+                raise HTTPException(status_code=400, detail="Requester is not active")
+            if not requester["email_verified"]:
+                raise HTTPException(status_code=400, detail="Requester email not verified")
+            if requester["role"] != "team_leader":
+                raise HTTPException(status_code=400, detail="Requester must be a team leader")
+
+            invite_code = await generate_unique_invite_code(conn)
+
+            team_row = await conn.fetchrow(
+                """
+                INSERT INTO teams (name, leader_id, invite_code)
+                VALUES ($1, $2::uuid, $3)
+                RETURNING id, name, leader_id, invite_code, created_at, updated_at
+                """,
+                req["team_name"],
+                str(req["requester_user_id"]),
+                invite_code,
+            )
+
+            await conn.execute(
+                "UPDATE users SET team_id=$2::uuid, updated_at=now() WHERE id=$1::uuid",
+                str(req["requester_user_id"]),
+                str(team_row["id"]),
+            )
+
+            await conn.execute(
+                """
+                UPDATE team_creation_requests
+                SET status='approved',
+                    reviewed_at=now(),
+                    reviewed_by=$2::uuid,
+                    approved_team_id=$3::uuid
+                WHERE id=$1::uuid
+                """,
+                str(req["id"]),
+                str(me["id"]),
+                str(team_row["id"]),
+            )
+
+            updated_req = await conn.fetchrow(
+                """
+                SELECT id, requester_user_id, team_name, status, requested_at, reviewed_at, reviewed_by, approved_team_id, admin_note
+                FROM team_creation_requests
+                WHERE id=$1::uuid
+                """,
+                str(req["id"]),
+            )
+
+    t = record_to_dict(team_row)
+    return {
+        "success": True,
+        "team": {
+            "id": str(t["id"]),
+            "name": t["name"],
+            "leader_id": str(t["leader_id"]),
+            "invite_code": t["invite_code"].upper(),
+            "created_at": t["created_at"].isoformat(),
+            "updated_at": t["updated_at"].isoformat(),
+        },
+        "request": serialize_team_creation_request(updated_req),
+    }
+
+
+@app.post("/teams/requests/{request_id}/reject")
+async def reject_team_request(request_id: str, body: RejectTeamRequestBody, me=Depends(get_current_user)):
+    if me["role"] != "ceo":
+        raise HTTPException(status_code=403, detail="Only CEO can reject requests")
+
+    pool = await init_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            req = await conn.fetchrow(
+                """
+                SELECT id, requester_user_id, team_name, status, requested_at, reviewed_at, reviewed_by, approved_team_id, admin_note
+                FROM team_creation_requests
+                WHERE id=$1::uuid
+                FOR UPDATE
+                """,
+                request_id,
+            )
+            if not req:
+                raise HTTPException(status_code=404, detail="Request not found")
+            if req["status"] != "pending":
+                raise HTTPException(status_code=400, detail="Request already reviewed")
+
+            await conn.execute(
+                """
+                UPDATE team_creation_requests
+                SET status='rejected',
+                    reviewed_at=now(),
+                    reviewed_by=$2::uuid,
+                    admin_note=$3
+                WHERE id=$1::uuid
+                """,
+                str(req["id"]),
+                str(me["id"]),
+                body.admin_note,
+            )
+
+            updated_req = await conn.fetchrow(
+                """
+                SELECT id, requester_user_id, team_name, status, requested_at, reviewed_at, reviewed_by, approved_team_id, admin_note
+                FROM team_creation_requests
+                WHERE id=$1::uuid
+                """,
+                str(req["id"]),
+            )
+
+    return {"success": True, "request": serialize_team_creation_request(updated_req)}
+
+
 class JoinTeamRequest(BaseModel):
     invite_code: str
 
@@ -1937,7 +2246,8 @@ async def join_team(body: JoinTeamRequest, me=Depends(get_current_user)):
     if me.get("role") not in ("team_member", "team_leader"):
         raise HTTPException(400, "Role must be set first.")
 
-    team = await fetchrow("SELECT id FROM teams WHERE invite_code=$1", body.invite_code.strip())
+    invite_code = body.invite_code.strip().upper()
+    team = await fetchrow("SELECT id FROM teams WHERE invite_code=$1", invite_code)
     if not team:
         raise HTTPException(400, "Invalid invite code.")
 
